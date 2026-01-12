@@ -91,7 +91,7 @@ feedbackSchema.statics.getFeedbackByUser = async function(userId, campusId = nul
     query.campusId = campusId;
   }
   return await this.find(query)
-    .populate('pinId', 'title category')
+    .populate('pinId', 'id title category image')
     .populate('campusId', 'name')
     .sort({ createdAt: -1 })
     .lean();

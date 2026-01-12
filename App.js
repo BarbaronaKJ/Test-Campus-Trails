@@ -131,12 +131,24 @@ const App = () => {
               
               // Transform MongoDB feedbacks to match app format
               const transformedFeedbacks = userFeedbacks.map(feedback => {
-                // Find the pin to get its title
-                const pin = pins.find(p => p._id === feedback.pinId);
+                // pinId is populated from backend with id, title, category
+                let pinTitle = feedback.pinId?.title || 'Unknown Building';
+                let pinId = feedback.pinId?._id || feedback.pinId;
+                
+                // If title looks like just a number, try to find the actual building name
+                if (pinTitle && !isNaN(pinTitle)) {
+                  const localPin = pins.find(p => p.id == pinTitle || p._id == pinId);
+                  if (localPin && localPin.title) {
+                    pinTitle = localPin.title;
+                  } else {
+                    pinTitle = `Building #${pinTitle}`;
+                  }
+                }
+                
                 return {
                   id: feedback._id,
-                  pinId: pin?.id || feedback.pinId,
-                  pinTitle: pin?.title || feedback.pinId?.title || 'Unknown Building',
+                  pinId: pinId,
+                  pinTitle: pinTitle,
                   rating: feedback.rating || 5,
                   comment: feedback.comment,
                   date: feedback.createdAt || new Date().toISOString(),
@@ -4688,12 +4700,24 @@ const App = () => {
                           
                           // Transform MongoDB feedbacks to match app format
                           const transformedFeedbacks = userFeedbacks.map(feedback => {
-                            // Find the pin to get its title
-                            const pin = pins.find(p => p._id === feedback.pinId);
+                            // pinId is populated from backend with id, title, category
+                            let pinTitle = feedback.pinId?.title || 'Unknown Building';
+                            let pinId = feedback.pinId?._id || feedback.pinId;
+                            
+                            // If title looks like just a number, try to find the actual building name
+                            if (pinTitle && !isNaN(pinTitle)) {
+                              const localPin = pins.find(p => p.id == pinTitle || p._id == pinId);
+                              if (localPin && localPin.title) {
+                                pinTitle = localPin.title;
+                              } else {
+                                pinTitle = `Building #${pinTitle}`;
+                              }
+                            }
+                            
                             return {
                               id: feedback._id,
-                              pinId: pin?.id || feedback.pinId,
-                              pinTitle: pin?.title || feedback.pinId?.title || 'Unknown Building',
+                              pinId: pinId,
+                              pinTitle: pinTitle,
                               rating: feedback.rating || 5,
                               comment: feedback.comment,
                               date: feedback.createdAt || new Date().toISOString(),
