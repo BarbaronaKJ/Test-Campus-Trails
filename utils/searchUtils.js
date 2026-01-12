@@ -1,20 +1,28 @@
-import { building9Rooms } from '../constants/rooms';
+// Rooms are now stored in database (Pin model floors/rooms structure)
 
 /**
- * Flatten all rooms from Building 9 for search
+ * Flatten all rooms from a pin's floors/rooms structure for search
+ * @param {Object} pin - Pin object with floors/rooms structure
  * @returns {Array} Array of all rooms with floor and building info
  */
-export const getAllRooms = () => {
+export const getAllRooms = (pin) => {
+  if (!pin || !pin.floors || !Array.isArray(pin.floors)) {
+    return [];
+  }
+  
   const rooms = [];
-  Object.entries(building9Rooms).forEach(([floor, floorRooms]) => {
-    floorRooms.forEach(room => {
-      rooms.push({
-        ...room,
-        floor: floor,
-        buildingId: 9,
-        type: 'room'
+  pin.floors.forEach((floor) => {
+    if (floor.rooms && Array.isArray(floor.rooms)) {
+      floor.rooms.forEach(room => {
+        rooms.push({
+          ...room,
+          floor: `Floor ${floor.level}`,
+          floorLevel: floor.level,
+          buildingId: pin.buildingNumber || pin.id,
+          type: 'room'
+        });
       });
-    });
+    }
   });
   return rooms;
 };

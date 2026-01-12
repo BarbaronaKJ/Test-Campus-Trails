@@ -161,10 +161,20 @@ router.post('/login', async (req, res) => {
   } catch (error) {
     console.error('Login error:', error);
     
-    if (error.message === 'Invalid login credentials') {
+    // Check if it's an authentication error
+    if (error.message === 'Invalid login credentials' || error.statusCode === 401) {
       return res.status(401).json({
         success: false,
         message: 'Invalid username/email or password',
+      });
+    }
+
+    // Log full error in development for debugging
+    if (process.env.NODE_ENV === 'development') {
+      console.error('Full login error details:', {
+        message: error.message,
+        stack: error.stack,
+        statusCode: error.statusCode
       });
     }
 
@@ -513,6 +523,173 @@ router.post('/logout', async (req, res) => {
     res.status(500).json({
       success: false,
       message: 'Server error during logout',
+      error: process.env.NODE_ENV === 'development' ? error.message : undefined,
+    });
+  }
+});
+
+/**
+ * Forgot Password - Request password reset
+ * POST /api/auth/forgot-password
+ * Request Body: { email, useOTP: true/false (optional, default: false) }
+ * 
+ * If useOTP is true, sends a 6-digit OTP code via email
+ * If useOTP is false, sends a reset link via email
+ */
+router.post('/forgot-password', async (req, res) => {
+  try {
+    const { email, useOTP } = req.body;
+
+    // Validation
+    if (!email) {
+      return res.status(400).json({
+        success: false,
+        message: 'Email is required',
+      });
+    }
+
+    // Find user by email
+    const user = await User.findByEmail(email.toLowerCase());
+    
+    // Always return success message (security best practice - don't reveal if email exists)
+    // But only send email if user exists
+    if (user) {
+      try {
+        // Generate reset token or OTP
+        let resetToken;
+        let resetUrl;
+        
+        if (useOTP === true) {
+          // Generate 6-digit OTP
+          const otpCode = user.generatePasswordResetOTP();
+          await user.save();
+          
+          // Send OTP via email
+          const { sendPasswordResetOTP } = require('../utils/emailService');
+          await sendPasswordResetOTP(user.email, otpCode);
+          
+          return res.json({
+            success: true,
+            message: 'Password reset code has been sent to your email',
+            // In development, return OTP for testing (remove in production)
+            ...(process.env.NODE_ENV === 'development' && { otpCode }),
+          });
+        } else {
+          // Generate reset token
+          resetToken = user.generatePasswordResetToken();
+          await user.save();
+          
+          // Build reset URL (pointing to Vercel web panel)
+          const baseUrl = process.env.RESET_PASSWORD_URL || process.env.WEB_PANEL_URL || 'https://your-vercel-app.vercel.app';
+          resetUrl = `${baseUrl}/reset-password?token=${resetToken}`;
+          
+          // Send reset link via email
+          const { sendPasswordResetEmail } = require('../utils/emailService');
+          await sendPasswordResetEmail(user.email, resetToken, resetUrl);
+          
+          return res.json({
+            success: true,
+            message: 'Password reset link has been sent to your email',
+            // In development, return reset URL for testing (remove in production)
+            ...(process.env.NODE_ENV === 'development' && { resetUrl }),
+          });
+        }
+      } catch (emailError) {
+        console.error('Error sending password reset email:', emailError);
+        // Still return success to user (don't reveal email service issues)
+        return res.json({
+          success: true,
+          message: 'If an account exists with this email, a password reset link has been sent',
+        });
+      }
+    } else {
+      // User doesn't exist, but return same message (security best practice)
+      return res.json({
+        success: true,
+        message: 'If an account exists with this email, a password reset link has been sent',
+      });
+    }
+  } catch (error) {
+    console.error('Forgot password error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Server error processing password reset request',
+      error: process.env.NODE_ENV === 'development' ? error.message : undefined,
+    });
+  }
+});
+
+/**
+ * Reset Password - Reset password using token or OTP
+ * POST /api/auth/reset-password
+ * Request Body: { token (or otpCode), newPassword }
+ */
+router.post('/reset-password', async (req, res) => {
+  try {
+    const { token, otpCode, newPassword } = req.body;
+
+    // Validation
+    if (!newPassword) {
+      return res.status(400).json({
+        success: false,
+        message: 'New password is required',
+      });
+    }
+
+    if (!token && !otpCode) {
+      return res.status(400).json({
+        success: false,
+        message: 'Reset token or OTP code is required',
+      });
+    }
+
+    // Validate new password strength
+    if (newPassword.length < 6) {
+      return res.status(400).json({
+        success: false,
+        message: 'Password must be at least 6 characters long',
+      });
+    }
+
+    // Check password has capital letter and symbol
+    const hasCapital = /[A-Z]/.test(newPassword);
+    const hasSymbol = /[!@#$%^&*()_+\-=\[\]{};':"\\|,.<>\/?]/.test(newPassword);
+    
+    if (!hasCapital || !hasSymbol) {
+      return res.status(400).json({
+        success: false,
+        message: 'Password must contain at least one capital letter and one symbol',
+      });
+    }
+
+    // Find user by reset token (works for both token and OTP)
+    const resetToken = token || otpCode;
+    const user = await User.findByResetToken(resetToken);
+
+    if (!user) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid or expired reset token. Please request a new password reset.',
+      });
+    }
+
+    // Update password
+    user.password = newPassword;
+    // Clear reset token fields
+    user.resetPasswordToken = undefined;
+    user.resetPasswordExpires = undefined;
+    
+    await user.save();
+
+    res.json({
+      success: true,
+      message: 'Password has been reset successfully. You can now login with your new password.',
+    });
+  } catch (error) {
+    console.error('Reset password error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Server error resetting password',
       error: process.env.NODE_ENV === 'development' ? error.message : undefined,
     });
   }

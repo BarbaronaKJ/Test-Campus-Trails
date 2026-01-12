@@ -2,11 +2,14 @@
  * Migration Script: Import pins from pinsData.js to MongoDB
  * 
  * This script reads the local pinsData.js file and imports all pins into MongoDB
+ * Uses the new schema where all pins (visible and invisible) go into the 'pins' collection
+ * with isVisible flag: true for visible pins, false for waypoints
  * Run this after setting up your MongoDB connection: node backend/scripts/migratePins.js
  */
 
 const mongoose = require('mongoose');
 const Pin = require('../models/Pin');
+const Campus = require('../models/Campus');
 const path = require('path');
 const fs = require('fs');
 require('dotenv').config({ path: path.join(__dirname, '../.env') });
@@ -39,7 +42,7 @@ const optimizeCloudinaryUrl = (url) => {
 /**
  * Convert local pin data to MongoDB format
  */
-const convertPinForMongoDB = (pin) => {
+const convertPinForMongoDB = (pin, campusId, isVisible) => {
   // Handle image: convert require() to URL string or keep URL string
   let imageUrl = pin.image;
   
@@ -77,16 +80,19 @@ const convertPinForMongoDB = (pin) => {
   }
   
   return {
-    id: pin.id,
+    campusId: campusId, // Required: link to campus
+    id: pin.id, // Legacy ID for backward compatibility
     x: pin.x,
     y: pin.y,
     title: pin.title?.toString() || pin.id?.toString() || '',
     description: pin.description || pin.title?.toString() || pin.id?.toString() || 'Pin',
-    image: imageUrl,
+    image: isVisible ? imageUrl : null, // Only visible pins need images
     category: category,
+    isVisible: isVisible, // true for visible pins, false for waypoints
+    qrCode: null, // Can be set later via web panel
     neighbors: pin.neighbors || [],
     buildingNumber: buildingNumber,
-    isInvisible: pin.isInvisible === true, // Preserve invisible flag for waypoints
+    floors: [], // Can be added later via web panel
     createdAt: new Date(),
     updatedAt: new Date()
   };
@@ -140,6 +146,33 @@ const loadPinsFromFile = async () => {
 };
 
 /**
+ * Create or find default campus
+ */
+const getOrCreateDefaultCampus = async () => {
+  // Try to find existing campus named "USTP-CDO"
+  let campus = await Campus.findOne({ name: 'USTP-CDO' });
+  
+  if (!campus) {
+    // Create default campus if it doesn't exist
+    console.log('📌 Creating default campus "USTP-CDO"...');
+    campus = await Campus.create({
+      name: 'USTP-CDO',
+      mapImage: 'ustp-cdo-map.png', // Default map image
+      categories: ['Buildings', 'Main Entrance', 'Amenities', 'Other'], // Default categories
+      coordinates: {
+        x: 0,
+        y: 0
+      }
+    });
+    console.log('   ✅ Created default campus\n');
+  } else {
+    console.log('📌 Using existing campus "USTP-CDO"\n');
+  }
+  
+  return campus;
+};
+
+/**
  * Main migration function
  */
 const migratePins = async () => {
@@ -163,82 +196,103 @@ const migratePins = async () => {
     console.log('✅ Connected to MongoDB Atlas');
     console.log(`   Database: ${mongoose.connection.name}\n`);
 
+    // Get or create default campus
+    const campus = await getOrCreateDefaultCampus();
+    const campusId = campus._id;
+
+    // Separate visible pins and invisible waypoints
+    const visiblePins = pins.filter(pin => !pin.isInvisible);
+    const invisibleWaypoints = pins.filter(pin => pin.isInvisible === true);
+    
+    console.log(`📊 Found ${visiblePins.length} visible pins and ${invisibleWaypoints.length} invisible waypoints\n`);
+
     // Clear existing pins (optional - comment out if you want to keep existing data)
-    const existingCount = await Pin.countDocuments();
-    if (existingCount > 0) {
-      console.log(`⚠️  Found ${existingCount} existing pins in database.`);
+    const existingPinCount = await Pin.countDocuments({ campusId });
+    if (existingPinCount > 0) {
+      console.log(`⚠️  Found ${existingPinCount} existing pins for this campus in database.`);
       console.log('   Clearing existing pins...');
-      await Pin.deleteMany({});
+      await Pin.deleteMany({ campusId });
       console.log('   ✅ Existing pins cleared\n');
     }
 
-    // Convert and insert pins
-    console.log(`📦 Migrating ${pins.length} pins to MongoDB...\n`);
+    // Convert and insert all pins (visible + invisible)
+    const allPins = [...visiblePins, ...invisibleWaypoints];
+    console.log(`📦 Migrating ${allPins.length} total pins (${visiblePins.length} visible + ${invisibleWaypoints.length} invisible) to 'pins' collection...\n`);
     
-    const convertedPins = pins.map(convertPinForMongoDB);
-    // Filter out invalid pins and ensure description exists (use title or id as fallback)
+    // Convert all pins
+    const convertedPins = allPins.map(pin => {
+      const isVisible = !pin.isInvisible;
+      return convertPinForMongoDB(pin, campusId, isVisible);
+    });
+    
+    // Filter out invalid pins and ensure required fields exist
     const validPins = convertedPins
       .filter(pin => pin.id !== undefined && pin.id !== null)
       .map(pin => ({
         ...pin,
-        // Ensure description exists - use title or id as fallback
         description: pin.description || pin.title || `Pin ${pin.id}` || 'Pin'
       }));
     
     console.log(`   Converting ${validPins.length} valid pins...`);
     
-    // Insert pins in batches to avoid overwhelming the database
+    // Insert pins in batches
     const batchSize = 10;
-    let inserted = 0;
-    let skipped = 0;
-    let errors = 0;
+    let pinsInserted = 0;
+    let pinsSkipped = 0;
+    let pinsErrors = 0;
 
     for (let i = 0; i < validPins.length; i += batchSize) {
       const batch = validPins.slice(i, i + batchSize);
       
       for (const pinData of batch) {
         try {
-          // Check if pin with this ID already exists
-          const existingPin = await Pin.findOne({ id: pinData.id });
+          // Check if pin already exists (by legacy id and campusId)
+          const existingPin = await Pin.findOne({ id: pinData.id, campusId });
           if (existingPin) {
             console.log(`   ⚠️  Skipping pin ${pinData.id} (${pinData.title}) - already exists`);
-            skipped++;
+            pinsSkipped++;
             continue;
           }
           
           await Pin.create(pinData);
-          inserted++;
-          if (inserted % 10 === 0) {
-            console.log(`   ✅ Inserted ${inserted}/${validPins.length} pins...`);
+          pinsInserted++;
+          if (pinsInserted % 10 === 0) {
+            console.log(`   ✅ Inserted ${pinsInserted}/${validPins.length} pins...`);
           }
         } catch (error) {
           if (error.code === 11000) {
-            // Duplicate key error
             console.log(`   ⚠️  Skipping pin ${pinData.id} (${pinData.title}) - duplicate ID`);
-            skipped++;
+            pinsSkipped++;
           } else {
             console.error(`   ❌ Error inserting pin ${pinData.id} (${pinData.title}):`, error.message);
-            errors++;
+            pinsErrors++;
           }
         }
       }
     }
 
     console.log('\n📊 Migration Summary:');
-    console.log(`   ✅ Successfully inserted: ${inserted} pins`);
-    console.log(`   ⚠️  Skipped: ${skipped} pins`);
-    if (errors > 0) {
-      console.log(`   ❌ Errors: ${errors} pins`);
+    console.log(`   ✅ Successfully inserted: ${pinsInserted} pins`);
+    console.log(`   ⚠️  Skipped: ${pinsSkipped} pins`);
+    if (pinsErrors > 0) {
+      console.log(`   ❌ Errors: ${pinsErrors} pins`);
     }
     console.log(`   📝 Total processed: ${validPins.length} pins\n`);
 
     // Verify migration
-    const finalCount = await Pin.countDocuments();
-    console.log(`✅ Migration completed! Total pins in database: ${finalCount}`);
-
-    if (finalCount > 0) {
-      console.log('\n🧪 Testing API endpoint...');
-      console.log('   You can now test: curl http://localhost:3000/api/pins');
+    const finalPinCount = await Pin.countDocuments({ campusId });
+    const visibleCount = await Pin.countDocuments({ campusId, isVisible: true });
+    const invisibleCount = await Pin.countDocuments({ campusId, isVisible: false });
+    
+    console.log(`✅ Migration completed!`);
+    console.log(`   Total pins in database for this campus: ${finalPinCount}`);
+    console.log(`   Visible pins: ${visibleCount}`);
+    console.log(`   Invisible waypoints: ${invisibleCount}`);
+    
+    if (finalPinCount > 0) {
+      console.log('\n🧪 Next steps:');
+      console.log('   - You can now test the API: curl http://localhost:3000/api/pins');
+      console.log('   - Add more campuses via MongoDB Compass or the web panel');
     }
 
   } catch (error) {

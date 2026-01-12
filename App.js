@@ -3,12 +3,12 @@ import { StyleSheet, View, Image, ImageBackground, Modal, Text, TouchableOpacity
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import ImageZoom from 'react-native-image-pan-zoom';
 import Icon from 'react-native-vector-icons/FontAwesome';
-import Svg, { Circle, Text as SvgText, Polyline } from 'react-native-svg';
+import Svg, { Circle, Text as SvgText, Polyline, G } from 'react-native-svg';
 import { styles } from './styles';
 import { aStarPathfinding } from './utils/pathfinding';
 import { allCategoryKeys, pinMatchesSelected, categoryPinIds } from './utils/categoryFilter';
-import { campuses } from './constants';
-import { building9Rooms } from './constants/rooms';
+// Campuses are now fetched from MongoDB API instead of constants
+// Rooms are now stored in database (Pin model floors/rooms structure)
 import { interpolateColor, interpolateBlueColor, interpolateRedColor, THROTTLE_MS } from './utils/colorInterpolation';
 import { getPinCategory, getCategorizedPins } from './utils/pinCategories';
 import { getAllRooms, getFilteredPins, getFilteredRooms, getSearchResults } from './utils/searchUtils';
@@ -18,7 +18,7 @@ import { usePins } from './utils/usePins';
 import { getProfilePictureUrl, uploadToCloudinaryDirect, CLOUDINARY_CONFIG } from './utils/cloudinaryUtils';
 import * as ImagePicker from 'expo-image-picker';
 import { loadUserData, saveUserData, addFeedback, addSavedPin, removeSavedPin, getActivityStats, updateSettings, updateProfile } from './utils/userStorage';
-import { register, login, getCurrentUser, updateUserProfile, updateUserActivity, changePassword, logout } from './services/api';
+import { register, login, getCurrentUser, updateUserProfile, updateUserActivity, changePassword, logout, fetchCampuses, forgotPassword } from './services/api';
 import { useBackHandler } from './utils/useBackHandler';
 
 const { width, height } = Dimensions.get('window');
@@ -27,6 +27,11 @@ const App = () => {
   // Fetch pins from MongoDB API with fallback to local pinsData
   // Set useApi to false to disable API fetching and use local data only
   const { pins, loading: pinsLoading, error: pinsError, isUsingLocalFallback, refetch: refetchPins } = usePins(true);
+
+  // Campuses state - fetched from MongoDB API
+  const [campuses, setCampuses] = useState(['USTP-CDO']); // Default fallback
+  const [campusesLoading, setCampusesLoading] = useState(false);
+  const [campusesError, setCampusesError] = useState(null);
 
   const [selectedPin, setSelectedPin] = useState(null);
   const [isModalVisible, setModalVisible] = useState(false);
@@ -187,6 +192,28 @@ const App = () => {
     restoreAuth();
   }, []);
 
+  // Function to load campuses from MongoDB API
+  const loadCampuses = async () => {
+    try {
+      setCampusesLoading(true);
+      setCampusesError(null);
+      const fetchedCampuses = await fetchCampuses();
+      setCampuses(fetchedCampuses);
+    } catch (error) {
+      console.error('Failed to fetch campuses from API, using default:', error);
+      setCampusesError(error.message);
+      // Keep default campuses on error (fallback)
+      setCampuses(['USTP-CDO', 'USTP-Alubijid', 'USTP-Claveria', 'USTP-Jasaan', 'USTP-Oroquieta', 'USTP-Panaon', 'USTP-Villanueva']);
+    } finally {
+      setCampusesLoading(false);
+    }
+  };
+
+  // Fetch campuses from MongoDB API on component mount
+  useEffect(() => {
+    loadCampuses();
+  }, []);
+
   useEffect(() => {
     Animated.timing(fadeAnim, {
       toValue: 1,
@@ -224,7 +251,7 @@ const App = () => {
   // Track if building details modal should be rendered (for animation)
   const [buildingDetailsRendered, setBuildingDetailsRendered] = useState(false);
   const [isBuildingDetailsVisible, setBuildingDetailsVisible] = useState(false);
-  const [selectedFloor, setSelectedFloor] = useState('Ground Floor');
+  const [selectedFloor, setSelectedFloor] = useState(0); // Floor level (0 = Ground Floor, 1 = 2nd Floor, etc.)
   const [cameFromPinDetails, setCameFromPinDetails] = useState(false);
   // User Auth Modal State (combines Login and Registration)
   const [isAuthModalVisible, setAuthModalVisible] = useState(false);
@@ -558,6 +585,13 @@ const App = () => {
   const buildingDetailsFadeAnim = useRef(new Animated.Value(0)).current;
   useEffect(() => {
     if (isBuildingDetailsVisible) {
+      // Set default floor to first floor from database when modal opens
+      if (selectedPin?.floors && selectedPin.floors.length > 0) {
+        const firstFloor = selectedPin.floors[0];
+        setSelectedFloor(firstFloor.level);
+      } else {
+        setSelectedFloor(0); // Default to Ground Floor (level 0)
+      }
       // Set to bottom position first (before render to avoid flash)
       buildingDetailsSlideAnim.setValue(300);
       buildingDetailsFadeAnim.setValue(0);
@@ -592,7 +626,7 @@ const App = () => {
         setBuildingDetailsRendered(false);
       });
     }
-  }, [isBuildingDetailsVisible, buildingDetailsSlideAnim, buildingDetailsFadeAnim, buildingDetailsRendered]);
+  }, [isBuildingDetailsVisible, buildingDetailsSlideAnim, buildingDetailsFadeAnim, buildingDetailsRendered, selectedPin]);
 
   // Auth Modal Animation (same as Settings Modal - slide from bottom)
   useEffect(() => {
@@ -941,6 +975,29 @@ const App = () => {
 
   const savePin = async () => {
     if (selectedPin) {
+      // Check if user is logged in
+      if (!isLoggedIn || !authToken) {
+        Alert.alert(
+          'Login Required',
+          'You must be logged in to save pins. Please login to continue.',
+          [
+            {
+              text: 'Cancel',
+              style: 'cancel',
+            },
+            {
+              text: 'Login',
+              onPress: () => {
+                setModalVisible(false); // Close pin details modal
+                setAuthModalVisible(true);
+                setAuthTab('login');
+              },
+            },
+          ]
+        );
+        return;
+      }
+
       try {
         // Check if pin is already saved
         const isSaved = savedPins.some(p => p.id === selectedPin.id);
@@ -1577,8 +1634,26 @@ const App = () => {
                 const pulseRadius = isActive ? radius + (Math.abs(Math.sin(pulseValue * Math.PI * 2)) * 8 / zoomScale) : 0;
                 const pulseOpacity = isActive ? Math.abs(Math.sin(pulseValue * Math.PI * 2)) * 0.3 : 0;
                 
+                // Calculate touch area radius (larger for better touch detection on Samsung)
+                const touchRadius = Math.max(radius + 8, 28 / zoomScale);
+                
                 return (
-                  <React.Fragment key={pin.id}>
+                  <G 
+                    key={pin.id} 
+                    onPress={() => handlePinPress(pin)}
+                    onPressIn={() => handlePinPress(pin)}
+                  >
+                    {/* Invisible larger circle for better touch detection (especially on Samsung) */}
+                    <Circle
+                      cx={pin.x}
+                      cy={pin.y}
+                      r={touchRadius}
+                      fill="transparent"
+                      stroke="transparent"
+                      strokeWidth={0}
+                      onPress={() => handlePinPress(pin)}
+                      onPressIn={() => handlePinPress(pin)}
+                    />
                     {/* Pulsing circle behind active pins */}
                     {isActive && pulseRadius > 0 && (
                       <Circle
@@ -1597,7 +1672,6 @@ const App = () => {
                       fill={fillColor}
                       stroke={strokeColor}
                       strokeWidth={strokeWidth / zoomScale}
-                      onPress={() => handlePinPress(pin)}
                     />
                     {/* Building Number Text */}
                     <SvgText
@@ -1611,10 +1685,42 @@ const App = () => {
                     >
                       {pin.title}
                     </SvgText>
-                  </React.Fragment>
+                  </G>
                 );
               })}
             </Svg>
+            
+            {/* TouchableOpacity overlays for better touch detection on Samsung devices */}
+            {visiblePinsForRender.map((pin) => {
+              // Skip invisible waypoints
+              if (pin.isInvisible) return null;
+              
+              // Calculate touch area size (larger for better detection)
+              const touchSize = Math.max(40, 56 / zoomScale);
+              const pinRadius = Math.max(20, 24 / zoomScale);
+              
+              return (
+                <TouchableOpacity
+                  key={`touch-${pin.id}`}
+                  style={{
+                    position: 'absolute',
+                    left: pin.x - touchSize / 2,
+                    top: pin.y - touchSize / 2,
+                    width: touchSize,
+                    height: touchSize,
+                    borderRadius: touchSize / 2,
+                    backgroundColor: 'transparent',
+                    // Ensure touch events work on Samsung
+                    zIndex: 10,
+                  }}
+                  activeOpacity={0.7}
+                  onPress={() => handlePinPress(pin)}
+                  // Prevent conflicts with ImageZoom pan gestures
+                  delayPressIn={0}
+                  delayPressOut={0}
+                />
+              );
+            })}
           </View>
         </ImageZoom>
       </View>
@@ -1885,6 +1991,9 @@ const App = () => {
                         if (refetchPins) {
                           await refetchPins();
                         }
+                        
+                        // Refresh campuses from database
+                        await loadCampuses();
                         
                         // Refresh user data from database if logged in
                         if (isLoggedIn && authToken) {
@@ -3068,7 +3177,9 @@ const App = () => {
                         setPinDetailModalRendered(false);
                         setModalVisible(false);
                         setBuildingDetailsVisible(true);
-                        setSelectedFloor('Ground Floor');
+                        // Set first floor from database, or default to level 0
+                        const firstFloor = selectedPin?.floors?.[0];
+                        setSelectedFloor(firstFloor ? firstFloor.level : 0);
                       } else {
                         setModalVisible(false);
                       }
@@ -3153,23 +3264,38 @@ const App = () => {
               <Text style={styles.buildingDetailsSectionTitle}>BUILDING LAYOUT DETAILS:</Text>
               
               <View style={styles.floorButtonsContainer}>
-                {['Ground Floor', '2nd Floor', '3rd Floor', '4th Floor'].map((floor, index) => (
-                  <TouchableOpacity
-                    key={floor}
-                    style={[
-                      styles.floorButton,
-                      selectedFloor === floor && styles.floorButtonSelected
-                    ]}
-                    onPress={() => setSelectedFloor(floor)}
-                  >
-                    <Text style={[
-                      styles.floorButtonText,
-                      selectedFloor === floor && styles.floorButtonTextSelected
-                    ]}>
-                      {floor}
-                    </Text>
-                  </TouchableOpacity>
-                ))}
+                {selectedPin?.floors && selectedPin.floors.length > 0 ? (
+                  selectedPin.floors.map((floor) => {
+                    // Format floor name: level 0 = "Ground Floor", level 1+ = "2nd Floor", "3rd Floor", etc.
+                    const floorName = floor.level === 0 
+                      ? 'Ground Floor' 
+                      : floor.level === 1 
+                        ? '2nd Floor' 
+                        : floor.level === 2 
+                          ? '3rd Floor' 
+                          : `${floor.level + 1}th Floor`;
+                    
+                    return (
+                      <TouchableOpacity
+                        key={floor.level}
+                        style={[
+                          styles.floorButton,
+                          selectedFloor === floor.level && styles.floorButtonSelected
+                        ]}
+                        onPress={() => setSelectedFloor(floor.level)}
+                      >
+                        <Text style={[
+                          styles.floorButtonText,
+                          selectedFloor === floor.level && styles.floorButtonTextSelected
+                        ]}>
+                          {floorName}
+                        </Text>
+                      </TouchableOpacity>
+                    );
+                  })
+                ) : (
+                  <Text style={styles.floorButtonText}>No floors available</Text>
+                )}
               </View>
               
               <View style={styles.giveFeedbackButtonContainer}>
@@ -3206,21 +3332,21 @@ const App = () => {
               </View>
               
               <Text style={styles.roomsTitle}>Rooms:</Text>
-              {building9Rooms[selectedFloor]?.map((room) => {
+              {selectedPin?.floors?.find(f => f.level === selectedFloor)?.rooms?.map((room) => {
                 // Convert room to pin-like object for saving
                 const roomAsPin = {
-                  id: room.id,
+                  id: room.name || room.id,
                   title: room.name,
-                  description: `${selectedPin?.description || 'Building 9'} - ${room.description}`,
-                  image: selectedPin?.image || require('./assets/USTP.jpg'),
+                  description: `${selectedPin?.description || selectedPin?.title || 'Building'} - ${room.description || ''}`,
+                  image: room.image || selectedPin?.image || require('./assets/USTP.jpg'),
                   x: selectedPin?.x || 0,
                   y: selectedPin?.y || 0,
                 };
-                const isRoomSaved = savedPins.some(p => p.id === room.id);
+                const isRoomSaved = savedPins.some(p => p.id === (room.name || room.id));
                 return (
-                  <View key={room.id} style={styles.roomCard}>
+                  <View key={room.name || room.id} style={styles.roomCard}>
                     <Image
-                      source={getOptimizedImage(require('./assets/USTP.jpg'))}
+                      source={getOptimizedImage(room.image || require('./assets/USTP.jpg'))}
                       style={styles.roomCardImage}
                       resizeMode="cover"
                     />
@@ -3231,12 +3357,37 @@ const App = () => {
                     <TouchableOpacity
                       onPress={async (e) => {
                         e.stopPropagation();
+                        
+                        // Check if user is logged in
+                        if (!isLoggedIn || !authToken) {
+                          Alert.alert(
+                            'Login Required',
+                            'You must be logged in to save rooms. Please login to continue.',
+                            [
+                              {
+                                text: 'Cancel',
+                                style: 'cancel',
+                              },
+                              {
+                                text: 'Login',
+                                onPress: () => {
+                                  setBuildingDetailsVisible(false); // Close building details modal
+                                  setAuthModalVisible(true);
+                                  setAuthTab('login');
+                                },
+                              },
+                            ]
+                          );
+                          return;
+                        }
+                        
                         try {
                           if (isRoomSaved) {
                             // Remove room from saved pins
-                            const updatedSavedPins = savedPins.filter(p => p.id !== room.id);
+                            const roomId = room.name || room.id;
+                            const updatedSavedPins = savedPins.filter(p => p.id !== roomId);
                             setSavedPins(updatedSavedPins);
-                            await removeSavedPin(room.id);
+                            await removeSavedPin(roomId);
                             
                             // Sync with database if logged in
                             if (isLoggedIn && authToken) {
@@ -3718,12 +3869,34 @@ const App = () => {
                             return;
                           }
 
-                          // Show coming soon message for now
+                          // Call forgot password API
+                          const response = await forgotPassword(regEmail.trim(), false); // false = use reset link, true = use OTP
+                          
                           setAuthLoading(false);
+                          
+                          // Prepare alert message
+                          let alertMessage = response.message || 'If an account exists with this email, a password reset link has been sent.';
+                          
+                          // In development mode, include reset URL in the alert if provided
+                          if (__DEV__ && response.resetUrl) {
+                            console.log('📧 Password Reset URL:', response.resetUrl);
+                            alertMessage += `\n\n🔗 Reset URL (Development):\n${response.resetUrl}`;
+                          }
+                          
+                          // Show success message
                           Alert.alert(
-                            'Forgot Password',
-                            'Password reset feature is coming soon! For now, please contact support if you need to reset your password.',
-                            [{ text: 'OK', style: 'default' }],
+                            'Password Reset',
+                            alertMessage,
+                            [
+                              {
+                                text: 'OK',
+                                onPress: () => {
+                                  // Return to login tab
+                                  setAuthTab('login');
+                                  setRegEmail('');
+                                }
+                              }
+                            ],
                             { cancelable: false }
                           );
                         } catch (error) {
@@ -3819,7 +3992,13 @@ const App = () => {
                         setPinsModalVisible(false);
                         // Open Building Details Modal with correct floor
                         setCameFromPinDetails(false);
-                        setSelectedFloor(item.floor);
+                        // Find the floor level from the room's floorLevel or floor property
+                        const floorLevel = typeof item.floorLevel === 'number' 
+                          ? item.floorLevel 
+                          : typeof item.floor === 'number' 
+                            ? item.floor 
+                            : building9Pin.floors?.[0]?.level || 0;
+                        setSelectedFloor(floorLevel);
                         setBuildingDetailsVisible(true);
                       }
                     } else {
@@ -3830,7 +4009,7 @@ const App = () => {
                 >
                 <Text style={styles.searchItem}>
                     <Text style={styles.searchDescription}>
-                      {item.type === 'room' ? `${item.name} - ${item.description} (Building 9, ${item.floor})` : item.description}
+                      {item.type === 'room' ? `${item.name} - ${item.description}${item.floor ? ` (${item.floor})` : ''}` : item.description}
                     </Text>
                 </Text>
               </TouchableOpacity>
@@ -3914,6 +4093,30 @@ const App = () => {
                       <TouchableOpacity
                         onPress={(e) => {
                           e.stopPropagation();
+                          
+                          // Check if user is logged in
+                          if (!isLoggedIn || !authToken) {
+                            Alert.alert(
+                              'Login Required',
+                              'You must be logged in to save pins. Please login to continue.',
+                              [
+                                {
+                                  text: 'Cancel',
+                                  style: 'cancel',
+                                },
+                                {
+                                  text: 'Login',
+                                  onPress: () => {
+                                    setPinsModalVisible(false); // Close View All Pins modal
+                                    setAuthModalVisible(true);
+                                    setAuthTab('login');
+                                  },
+                                },
+                              ]
+                            );
+                            return;
+                          }
+                          
                           if (isPinSaved) {
                             removeSavedPin(pin.id);
                             setSavedPins(savedPins.filter(p => p.id !== pin.id));

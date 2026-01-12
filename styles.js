@@ -557,7 +557,7 @@ export const styles = StyleSheet.create({
   },
   searchContainer: { 
     position: 'absolute', 
-    top: 80, 
+    top: 90, 
     left: 20, 
     right: 20, 
     backgroundColor: '#f5f5f5', 
@@ -572,7 +572,7 @@ export const styles = StyleSheet.create({
   },
   campusContainer: { 
     position: 'absolute', 
-    top: 80, 
+    top: 90, 
     left: 90, 
     right: 90, 
     backgroundColor: '#f5f5f5', 

@@ -29,6 +29,8 @@ app.get('/health', (req, res) => {
 // API Routes
 app.use('/api/pins', require('./routes/pins'));
 app.use('/api/auth', require('./routes/auth'));
+app.use('/api/campuses', require('./routes/campuses'));
+app.use('/api/feedbacks', require('./routes/feedbacks'));
 
 // MongoDB Connection
 const connectDB = async () => {

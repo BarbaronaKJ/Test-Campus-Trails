@@ -367,6 +367,74 @@ export const changePassword = async (token, oldPassword, newPassword) => {
 };
 
 /**
+ * Request password reset (forgot password)
+ * @param {string} email - User's email address
+ * @param {boolean} useOTP - Whether to use OTP code instead of reset link (default: false)
+ * @returns {Promise<Object>} Success response with message (and resetUrl/otpCode in development)
+ */
+export const forgotPassword = async (email, useOTP = false) => {
+  try {
+    const response = await fetch(`${API_BASE_URL}/api/auth/forgot-password`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ email, useOTP }),
+    });
+
+    const data = await response.json();
+
+    if (!response.ok) {
+      throw new Error(data.message || 'Failed to send password reset email');
+    }
+
+    return data; // { success: true, message: '...', resetUrl?: '...', otpCode?: '...' }
+  } catch (error) {
+    console.error('Forgot password error:', error);
+    throw error;
+  }
+};
+
+/**
+ * Reset password using token or OTP code
+ * @param {string} token - Password reset token (from email link)
+ * @param {string} otpCode - 6-digit OTP code (alternative to token)
+ * @param {string} newPassword - New password
+ * @returns {Promise<Object>} Success response
+ */
+export const resetPassword = async (token, newPassword, otpCode = null) => {
+  try {
+    const body = { newPassword };
+    if (token) {
+      body.token = token;
+    } else if (otpCode) {
+      body.otpCode = otpCode;
+    } else {
+      throw new Error('Either token or otpCode is required');
+    }
+
+    const response = await fetch(`${API_BASE_URL}/api/auth/reset-password`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(body),
+    });
+
+    const data = await response.json();
+
+    if (!response.ok) {
+      throw new Error(data.message || 'Failed to reset password');
+    }
+
+    return data; // { success: true, message: 'Password has been reset successfully...' }
+  } catch (error) {
+    console.error('Reset password error:', error);
+    throw error;
+  }
+};
+
+/**
  * Logout user (requires authentication token)
  * @param {string} token - JWT authentication token (optional, for server-side logging)
  * @returns {Promise<Object>} Success response
@@ -396,6 +464,71 @@ export const logout = async (token) => {
     return data; // { success: true, message: 'Logged out successfully' }
   } catch (error) {
     console.error('Logout error:', error);
+    throw error;
+  }
+};
+
+/**
+ * Campuses API endpoints
+ */
+
+/**
+ * Fetch all campuses from the backend API
+ * @returns {Promise<Array>} Array of campus objects with { name, order, active }
+ */
+export const fetchCampuses = async () => {
+  try {
+    const response = await fetch(`${API_BASE_URL}/api/campuses`, {
+      method: 'GET',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+    });
+
+    if (!response.ok) {
+      throw new Error(`HTTP error! status: ${response.status}`);
+    }
+
+    const data = await response.json();
+    
+    if (data.success) {
+      // Return array of campus names (for backward compatibility)
+      return data.data.map(campus => campus.name);
+    } else {
+      throw new Error(data.message || 'Failed to fetch campuses');
+    }
+  } catch (error) {
+    console.error('Error fetching campuses from API:', error);
+    throw error;
+  }
+};
+
+/**
+ * Fetch all campuses (including inactive) from the backend API
+ * @returns {Promise<Array>} Array of campus objects with { name, order, active }
+ */
+export const fetchAllCampuses = async () => {
+  try {
+    const response = await fetch(`${API_BASE_URL}/api/campuses/all`, {
+      method: 'GET',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+    });
+
+    if (!response.ok) {
+      throw new Error(`HTTP error! status: ${response.status}`);
+    }
+
+    const data = await response.json();
+    
+    if (data.success) {
+      return data.data.map(campus => campus.name);
+    } else {
+      throw new Error(data.message || 'Failed to fetch campuses');
+    }
+  } catch (error) {
+    console.error('Error fetching all campuses from API:', error);
     throw error;
   }
 };

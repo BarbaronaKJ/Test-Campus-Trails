@@ -1,16 +1,23 @@
 const mongoose = require('mongoose');
 
 /**
- * Pin Schema - Represents a building/facility pin on the campus map
- * All fields are editable directly in MongoDB Compass or Atlas
+ * Pin Schema - Handles both Visible Facilities and Invisible Waypoints
+ * Links to Campus via campusId for filtering
  */
 const pinSchema = new mongoose.Schema({
-  // Unique identifier for the pin (can be number or string)
-  id: {
-    type: mongoose.Schema.Types.Mixed, // Allows both Number and String
+  // Foreign Key → Campus._id
+  campusId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'Campus',
     required: true,
-    unique: true,
     index: true
+  },
+  
+  // Unique identifier for the pin (can be number or string)
+  // This is the legacy ID from pinsData.js, kept for backward compatibility
+  id: {
+    type: mongoose.Schema.Types.Mixed,
+    required: true
   },
   
   // Position on the map (x, y coordinates)
@@ -26,40 +33,55 @@ const pinSchema = new mongoose.Schema({
     default: 0
   },
   
-  // Display title (short label, e.g., "ME", "1", "SL1")
+  // Display title (e.g., "ICT Building", "Main Entrance")
   title: {
     type: String,
     required: true,
     trim: true
   },
   
-  // Full description (e.g., "Main Entrance", "BLDG 1 | Arts & Culture Building")
+  // Full description
   description: {
     type: String,
-    required: true,
-    trim: true
+    trim: true,
+    default: null
   },
   
-  // Image URL (Cloudinary URL or local asset path)
-  // When storing Cloudinary URLs, ensure f_auto,q_auto parameters are included for optimization
-  // Format: https://res.cloudinary.com/xxx/image/upload/f_auto,q_auto/v1768037837/image.jpg
-  image: {
-    type: String,
-    required: true,
-    trim: true
-  },
-  
-  // Category for filtering (e.g., "Academic Core Zone", "Essential Services", "Amenities")
+  // Category (e.g., "Laboratory", "Office", "Canteen")
   category: {
     type: String,
     trim: true,
     default: 'Other',
-    index: true // Index for faster filtering
+    index: true
+  },
+  
+  // Boolean: True for map pins (visible facilities), False for pathfinding waypoints
+  isVisible: {
+    type: Boolean,
+    required: true,
+    default: true,
+    index: true
+  },
+  
+  // QR Code identifier (e.g., "ict_bldg_001")
+  qrCode: {
+    type: String,
+    trim: true,
+    default: null,
+    index: true
+  },
+  
+  // Image URL (Cloudinary URL or local asset path)
+  // Only used for visible pins, waypoints don't need images
+  image: {
+    type: String,
+    trim: true,
+    default: null
   },
   
   // Neighbors array for pathfinding (array of pin IDs that connect to this pin)
   neighbors: {
-    type: [mongoose.Schema.Types.Mixed], // Allows both Number and String IDs
+    type: [mongoose.Schema.Types.Mixed],
     default: [],
     index: true
   },
@@ -71,13 +93,37 @@ const pinSchema = new mongoose.Schema({
     index: true
   },
   
-  // Invisible waypoints: used for pathfinding but not displayed to users
-  isInvisible: {
-    type: Boolean,
-    default: false
-  },
+  // Floors array with nested rooms
+  floors: [{
+    level: {
+      type: Number,
+      required: true
+    },
+    floorPlan: {
+      type: String, // Image URL (e.g., "ict_f1.png")
+      trim: true,
+      default: null
+    },
+    rooms: [{
+      name: {
+        type: String,
+        required: true,
+        trim: true
+      },
+      image: {
+        type: String, // Image URL (e.g., "room_402.jpg")
+        trim: true,
+        default: null
+      },
+      description: {
+        type: String,
+        trim: true,
+        default: null
+      }
+    }]
+  }],
   
-  // Timestamps for tracking updates
+  // Timestamps
   createdAt: {
     type: Date,
     default: Date.now
@@ -88,7 +134,8 @@ const pinSchema = new mongoose.Schema({
     default: Date.now
   }
 }, {
-  timestamps: true // Automatically manage createdAt and updatedAt
+  timestamps: true,
+  collection: 'pins' // Collection name for all pins (visible and invisible)
 });
 
 // Update the updatedAt field before saving
@@ -97,52 +144,69 @@ pinSchema.pre('save', function(next) {
   next();
 });
 
-// Index for faster queries by category, buildingNumber, and visibility
-pinSchema.index({ category: 1, buildingNumber: 1 });
-pinSchema.index({ isInvisible: 1 });
+// Compound indexes for common queries
+pinSchema.index({ campusId: 1, isVisible: 1 });
+pinSchema.index({ campusId: 1, category: 1 });
+pinSchema.index({ campusId: 1, title: 1 });
+pinSchema.index({ id: 1 }); // Legacy ID index (for backward compatibility)
 
-// Method to optimize Cloudinary image URL if not already optimized
-pinSchema.methods.getOptimizedImage = function() {
-  if (!this.image) return this.image;
-  
-  // If it's already a Cloudinary URL and doesn't have optimization parameters
-  if (this.image.includes('res.cloudinary.com') && !this.image.includes('f_auto,q_auto')) {
-    const uploadIndex = this.image.indexOf('/upload/');
-    if (uploadIndex !== -1) {
-      const baseUrl = this.image.substring(0, uploadIndex + '/upload/'.length);
-      const pathAfterUpload = this.image.substring(uploadIndex + '/upload/'.length);
-      return `${baseUrl}f_auto,q_auto/${pathAfterUpload}`;
-    }
-  }
-  
-  return this.image;
-};
-
-// Static method to get all pins sorted by ID (visible only by default)
-pinSchema.statics.getAllPins = async function(includeInvisible = false) {
-  // Filter out invisible waypoints unless explicitly requested
-  // Query: exclude pins where isInvisible is explicitly true
-  const query = includeInvisible ? {} : { isInvisible: { $ne: true } };
-  return await this.find(query).sort({ id: 1 }).lean();
-};
-
-// Static method to get all pins including invisible ones (for pathfinding)
-pinSchema.statics.getAllPinsForPathfinding = async function() {
-  return await this.find({}).sort({ id: 1 }).lean();
-};
-
-// Static method to get pins by category (visible only)
-pinSchema.statics.getPinsByCategory = async function(category, includeInvisible = false) {
-  const query = { category };
+// Static method to get all pins for a campus (optionally filter by visibility)
+pinSchema.statics.getPinsByCampus = async function(campusId, includeInvisible = false) {
+  const query = { campusId };
   if (!includeInvisible) {
-    query.isInvisible = { $ne: true };
+    query.isVisible = true;
   }
   return await this.find(query).sort({ id: 1 }).lean();
 };
 
-// Static method to get pin by ID
-pinSchema.statics.getPinById = async function(id) {
-  return await this.findOne({ id }).lean();
+// Static method to get pins by category for a campus
+pinSchema.statics.getPinsByCategory = async function(campusId, category, includeInvisible = false) {
+  const query = { campusId, category };
+  if (!includeInvisible) {
+    query.isVisible = true;
+  }
+  return await this.find(query).sort({ id: 1 }).lean();
 };
 
-module.exports = mongoose.model('Pin', pinSchema);
+// Static method to search pins by title for a campus
+pinSchema.statics.searchPins = async function(campusId, searchQuery, includeInvisible = false) {
+  const query = {
+    campusId,
+    title: { $regex: searchQuery, $options: 'i' }
+  };
+  if (!includeInvisible) {
+    query.isVisible = true;
+  }
+  return await this.find(query).sort({ id: 1 }).lean();
+};
+
+// Static method to get pin by ID (legacy ID or _id)
+pinSchema.statics.getPinById = async function(pinId, campusId = null) {
+  const query = {};
+  
+  // Try to match by legacy id (number/string) or _id (ObjectId)
+  if (mongoose.Types.ObjectId.isValid(pinId)) {
+    query._id = pinId;
+  } else {
+    query.id = isNaN(pinId) ? pinId : Number(pinId);
+  }
+  
+  if (campusId) {
+    query.campusId = campusId;
+  }
+  
+  return await this.findOne(query).lean();
+};
+
+// Static method to get all pins (for pathfinding - includes invisible waypoints)
+pinSchema.statics.getAllPins = async function(campusId = null) {
+  const query = {};
+  if (campusId) {
+    query.campusId = campusId;
+  }
+  return await this.find(query).sort({ id: 1 }).lean();
+};
+
+const Pin = mongoose.model('Pin', pinSchema);
+
+module.exports = Pin;
