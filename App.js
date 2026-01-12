@@ -1360,8 +1360,8 @@ const App = () => {
         }
       } else {
         // Save locally only (not logged in)
-        const feedbackEntries = validFeedbacks.map(f => ({
-          id: Date.now() + Math.random(), // Unique ID
+        const feedbackEntries = validFeedbacks.map((f, index) => ({
+          id: `feedback-${Date.now()}-${index}`, // Unique stable ID
           pinId: f.buildingId,
           pinTitle: f.buildingTitle,
           rating: f.rating,
@@ -3870,7 +3870,7 @@ const App = () => {
                       if (selectedPin) {
                         // Create feedback entry - ensure all fields match backend schema
                         const feedbackEntry = {
-                          id: Date.now(), // Number type
+                          id: `feedback-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`, // Unique stable ID
                           pinId: selectedPin.id, // Number type
                           pinTitle: selectedPin.description || selectedPin.title || 'Unknown', // String type
                           rating: feedbackRating, // Number type (1-5)
