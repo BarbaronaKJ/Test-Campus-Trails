@@ -663,3 +663,117 @@ export const getPinFeedbacks = async (pinId, campusId) => {
     throw error;
   }
 };
+
+/**
+ * ===================================
+ * NOTIFICATION API FUNCTIONS
+ * ===================================
+ */
+
+/**
+ * Fetch notifications for a specific campus (mobile app)
+ * @param {string} token - User authentication token
+ * @param {string} campusId - Campus ID to filter notifications
+ * @param {number} page - Page number for pagination (default: 1)
+ * @param {number} limit - Number of items per page (default: 20)
+ * @returns {Promise<Object>} Object containing notifications array and pagination info
+ */
+export const fetchNotifications = async (token, campusId, page = 1, limit = 20) => {
+  try {
+    const url = `${API_BASE_URL}/api/notifications/mobile/list?campusId=${campusId}&page=${page}&limit=${limit}`;
+    console.log('Fetching notifications from:', url);
+    console.log('Using token:', token ? 'Token exists' : 'No token');
+    
+    const response = await fetch(
+      url,
+      {
+        method: 'GET',
+        headers: {
+          'Authorization': `Bearer ${token}`,
+          'Content-Type': 'application/json',
+        },
+      }
+    );
+
+    console.log('Notification fetch response status:', response.status);
+    
+    const data = await response.json();
+    console.log('Notification fetch response data:', data);
+
+    if (!response.ok) {
+      throw new Error(data.message || 'Failed to fetch notifications');
+    }
+
+    return {
+      notifications: data.notifications || [],
+      pagination: data.pagination || { hasMore: false }
+    };
+  } catch (error) {
+    console.error('Fetch notifications error:', error);
+    console.error('Error message:', error.message);
+    throw error;
+  }
+};
+
+/**
+ * Mark a notification as read (increments read count)
+ * @param {string} token - User authentication token
+ * @param {string} notificationId - ID of the notification to mark as read
+ * @returns {Promise<Object>} Response data
+ */
+export const markNotificationRead = async (token, notificationId) => {
+  try {
+    const response = await fetch(`${API_BASE_URL}/api/notifications/${notificationId}/read`, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+    });
+
+    const data = await response.json();
+
+    if (!response.ok) {
+      throw new Error(data.message || 'Failed to mark notification as read');
+    }
+
+    return data;
+  } catch (error) {
+    console.error('Mark notification read error:', error);
+    throw error;
+  }
+};
+
+/**
+ * Get count of unread notifications
+ * @param {string} token - User authentication token
+ * @param {string} campusId - Campus ID to filter notifications
+ * @param {string} lastChecked - ISO timestamp of when user last checked notifications
+ * @returns {Promise<number>} Count of unread notifications
+ */
+export const getUnreadNotificationsCount = async (token, campusId, lastChecked = null) => {
+  try {
+    const url = lastChecked
+      ? `${API_BASE_URL}/api/notifications/mobile/unread-count?campusId=${campusId}&lastChecked=${lastChecked}`
+      : `${API_BASE_URL}/api/notifications/mobile/unread-count?campusId=${campusId}`;
+
+    const response = await fetch(url, {
+      method: 'GET',
+      headers: {
+        'Authorization': `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+    });
+
+    const data = await response.json();
+
+    if (!response.ok) {
+      throw new Error(data.message || 'Failed to get unread count');
+    }
+
+    return data.unreadCount || 0;
+  } catch (error) {
+    console.error('Get unread notifications count error:', error);
+    throw error;
+  }
+};

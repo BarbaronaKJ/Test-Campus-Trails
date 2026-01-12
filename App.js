@@ -18,7 +18,7 @@ import { usePins } from './utils/usePins';
 import { getProfilePictureUrl, uploadToCloudinaryDirect, CLOUDINARY_CONFIG } from './utils/cloudinaryUtils';
 import * as ImagePicker from 'expo-image-picker';
 import { loadUserData, saveUserData, addFeedback, addSavedPin, removeSavedPin, getActivityStats, updateSettings, updateProfile } from './utils/userStorage';
-import { register, login, getCurrentUser, updateUserProfile, updateUserActivity, changePassword, logout, fetchCampuses, forgotPassword, createFeedback, createBatchFeedback, getUserFeedbacks, getPinFeedbacks } from './services/api';
+import { register, login, getCurrentUser, updateUserProfile, updateUserActivity, changePassword, logout, fetchCampuses, forgotPassword, createFeedback, createBatchFeedback, getUserFeedbacks, getPinFeedbacks, fetchNotifications, markNotificationRead, getUnreadNotificationsCount } from './services/api';
 import { useBackHandler } from './utils/useBackHandler';
 
 const { width, height } = Dimensions.get('window');
@@ -51,6 +51,14 @@ const App = () => {
   const fadeAnim = useRef(new Animated.Value(0)).current;
   // Path line style setting (dot, dash, or solid)
   const [pathLineStyle, setPathLineStyle] = useState('dash'); // 'dot', 'dash', or 'solid'
+  
+  // Notifications state
+  const [notifications, setNotifications] = useState([]);
+  const [unreadCount, setUnreadCount] = useState(0);
+  const [notificationsVisible, setNotificationsVisible] = useState(false);
+  const [selectedNotification, setSelectedNotification] = useState(null);
+  const [notificationsLoading, setNotificationsLoading] = useState(false);
+  const [lastNotificationCheck, setLastNotificationCheck] = useState(null);
   
   // Color settings for active pins during pathfinding
   const [pointAColorLight, setPointAColorLight] = useState({ r: 100, g: 181, b: 246 }); // Light blue default
@@ -1124,7 +1132,105 @@ const App = () => {
 
   const handleCampusChange = (campus) => {
     handleCampusChangeUtil(setCampusVisible);
+    // Fetch notifications for the new campus
+    if (isLoggedIn && authToken) {
+      fetchNotificationsData(campus);
+    }
   };
+
+  // Notification functions
+  const fetchNotificationsData = async (campusId = 'USTP-CDO') => {
+    if (!isLoggedIn || !authToken) {
+      console.log('Not logged in or no auth token, skipping notification fetch');
+      return;
+    }
+    
+    try {
+      console.log('Fetching notifications for campus:', campusId);
+      console.log('Using auth token:', authToken ? 'Token exists' : 'No token');
+      
+      setNotificationsLoading(true);
+      const { notifications: fetchedNotifications } = await fetchNotifications(authToken, campusId);
+      
+      console.log('Received notifications count:', fetchedNotifications.length);
+      console.log('Notifications:', fetchedNotifications);
+      
+      setNotifications(fetchedNotifications);
+      
+      // Update last check timestamp
+      const now = new Date().toISOString();
+      setLastNotificationCheck(now);
+      await AsyncStorage.setItem('lastNotificationCheck', now);
+      
+      // Reset unread count
+      setUnreadCount(0);
+    } catch (error) {
+      console.error('Error fetching notifications:', error);
+      console.error('Error details:', error.message);
+    } finally {
+      setNotificationsLoading(false);
+    }
+  };
+
+  const checkForNewNotifications = async () => {
+    if (!isLoggedIn || !authToken) return;
+    
+    try {
+      const lastCheck = await AsyncStorage.getItem('lastNotificationCheck');
+      const count = await getUnreadNotificationsCount(authToken, 'USTP-CDO', lastCheck);
+      setUnreadCount(count);
+    } catch (error) {
+      console.error('Error checking for new notifications:', error);
+    }
+  };
+
+  const handleNotificationPress = async (notification) => {
+    setSelectedNotification(notification);
+    
+    // Mark as read
+    try {
+      await markNotificationRead(authToken, notification._id);
+      // Update read count in local state
+      setNotifications(prevNotifications =>
+        prevNotifications.map(n =>
+          n._id === notification._id ? { ...n, readCount: n.readCount + 1 } : n
+        )
+      );
+    } catch (error) {
+      console.error('Error marking notification as read:', error);
+    }
+  };
+
+  const handleNotificationPinPress = (pinId) => {
+    // Close notification modals
+    setSelectedNotification(null);
+    setNotificationsVisible(false);
+    
+    // Find the pin and zoom to it
+    const pin = pins.find(p => p._id === pinId || p.id === pinId);
+    if (pin) {
+      handlePinPress(pin);
+    } else {
+      Alert.alert('Pin Not Found', 'The facility linked to this notification could not be found.');
+    }
+  };
+
+  const refreshNotifications = async () => {
+    await fetchNotificationsData();
+  };
+
+  // Poll for new notifications every 60 seconds
+  useEffect(() => {
+    if (!isLoggedIn || !authToken) return;
+    
+    // Initial fetch
+    fetchNotificationsData();
+    
+    // Check for new notifications every 60 seconds
+    const intervalId = setInterval(checkForNewNotifications, 60000);
+    
+    return () => clearInterval(intervalId);
+  }, [isLoggedIn, authToken]);
 
   // Handle profile picture upload (Direct Upload to Cloudinary)
   const handleProfilePictureUpload = async (imageUri) => {
@@ -1621,11 +1727,32 @@ const App = () => {
           <Icon name="question-circle" size={20} color="white" />
         </TouchableOpacity>
 
-        {/* Change Campus Button (Center) */}
-        <TouchableOpacity key="campus-button" style={styles.headerButtonCenter} onPress={toggleCampus}>
-          <Icon name="exchange" size={20} color="white" />
-          <Text style={styles.buttonText}>USTP-CDO</Text>
-        </TouchableOpacity>
+        {/* Notification Button (Right-Top) */}
+        {isLoggedIn && (
+          <TouchableOpacity 
+            key="notification-button" 
+            style={[styles.headerButtonRight, { marginRight: 50 }]} 
+            onPress={() => {
+              setSearchVisible(false);
+              setCampusVisible(false);
+              setFilterModalVisible(false);
+              setShowPathfindingPanel(false);
+              setPinsModalVisible(false);
+              setModalVisible(false);
+              setSettingsVisible(false);
+              setNotificationsVisible(true);
+            }}
+          >
+            <Icon name="bell" size={20} color="white" />
+            {unreadCount > 0 && (
+              <View style={styles.notificationBadge}>
+                <Text style={styles.notificationBadgeText}>
+                  {unreadCount > 99 ? '99+' : unreadCount}
+                </Text>
+              </View>
+            )}
+          </TouchableOpacity>
+        )}
 
         {/* Search Button (Right) */}
         <TouchableOpacity key="search-button" style={styles.headerButtonRight} onPress={toggleSearch}>
@@ -5442,6 +5569,208 @@ const App = () => {
         </View>
         </Animated.View>
       )}
+
+      {/* Notifications Modal */}
+      {notificationsVisible && (
+        <View style={[styles.fullScreenModal, { backgroundColor: 'rgba(0,0,0,0.7)' }]}>
+          <View style={[styles.modalContainerLarge, { backgroundColor: '#ffffff', maxHeight: '80%' }]}>
+            <View style={styles.modalHeaderWhite}>
+              <Text style={[styles.modalTitleWhite, { marginBottom: 0, flex: 1 }]}>Notifications</Text>
+              <TouchableOpacity onPress={() => setNotificationsVisible(false)} style={{ padding: 8 }}>
+                <Icon name="times" size={24} color="#333" />
+              </TouchableOpacity>
+            </View>
+            <View style={styles.lineDark}></View>
+            
+            {notificationsLoading ? (
+              <View style={styles.notificationEmptyState}>
+                <Text style={{ fontSize: 24, marginBottom: 12 }}>⏳</Text>
+                <Text style={styles.notificationLoadingText}>Loading notifications...</Text>
+              </View>
+            ) : notifications.length === 0 ? (
+              <View style={styles.notificationEmptyState}>
+                <Text style={styles.notificationEmptyIcon}>🔔</Text>
+                <Text style={styles.notificationEmptyText}>No notifications yet</Text>
+                <Text style={{ fontSize: 12, color: '#bbb', marginTop: 8 }}>Check back later for updates</Text>
+              </View>
+            ) : (
+              <FlatList
+                data={notifications}
+                keyExtractor={(item) => item._id}
+                renderItem={({ item: notification }) => {
+                  const getTypeIcon = (type) => {
+                    switch (type) {
+                      case 'announcement': return '📢';
+                      case 'alert': return '⚠️';
+                      case 'event': return '📅';
+                      case 'facility-update': return '🏢';
+                      case 'emergency': return '🚨';
+                      default: return '📌';
+                    }
+                  };
+                  const getPriorityColor = (priority) => {
+                    switch (priority) {
+                      case 'high': return '#e74c3c';
+                      case 'low': return '#95a5a6';
+                      default: return '#3498db';
+                    }
+                  };
+                  const getTypeBackgroundColor = (type) => {
+                    switch (type) {
+                      case 'announcement': return '#e8f4f8';
+                      case 'alert': return '#fef5e7';
+                      case 'event': return '#f0e8f8';
+                      case 'facility-update': return '#e8f5e9';
+                      case 'emergency': return '#ffe8e8';
+                      default: return '#f5f5f5';
+                    }
+                  };
+                  const formatDate = (dateString) => {
+                    const date = new Date(dateString);
+                    const now = new Date();
+                    const diffInMs = now - date;
+                    const diffInHours = diffInMs / (1000 * 60 * 60);
+                    if (diffInHours < 1) return `${Math.floor(diffInMs / 60000)} mins ago`;
+                    if (diffInHours < 24) return `${Math.floor(diffInHours)} hours ago`;
+                    return date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+                  };
+                  return (
+                    <TouchableOpacity
+                      style={[styles.notificationContainer, { borderLeftColor: getPriorityColor(notification.priority) }]}
+                      onPress={() => handleNotificationPress(notification)}
+                      activeOpacity={0.7}
+                    >
+                      <View style={styles.notificationHeader}>
+                        <View style={[styles.notificationIconContainer, { backgroundColor: getTypeBackgroundColor(notification.type) }]}>
+                          <Text style={styles.notificationTypeIcon}>{getTypeIcon(notification.type)}</Text>
+                        </View>
+                        <View style={styles.notificationTitleSection}>
+                          <Text style={styles.notificationTitle} numberOfLines={1}>{notification.title}</Text>
+                          <Text style={styles.notificationMessage} numberOfLines={2}>{notification.message}</Text>
+                        </View>
+                      </View>
+                      <View style={styles.notificationFooter}>
+                        <Text style={styles.notificationTime}>{formatDate(notification.createdAt)}</Text>
+                        {notification.priority === 'high' && (
+                          <View style={styles.notificationPriorityBadge}>
+                            <Text style={styles.notificationPriorityText}>⚡ HIGH</Text>
+                          </View>
+                        )}
+                      </View>
+                    </TouchableOpacity>
+                  );
+                }}
+                contentContainerStyle={{ paddingVertical: 8, paddingBottom: 16 }}
+                scrollEnabled={true}
+              />
+            )}
+          </View>
+        </View>
+      )}
+
+      {/* Notification Detail Modal */}
+      {selectedNotification && (
+        <View style={[styles.fullScreenModal, { backgroundColor: 'rgba(0,0,0,0.8)' }]}>
+          <View style={[styles.modalContainerLarge, { backgroundColor: '#ffffff', maxHeight: '80%', borderRadius: 20 }]}>
+            <View style={[styles.notificationDetailHeader, { paddingHorizontal: 20, paddingVertical: 16 }]}>
+              <Text style={styles.notificationDetailTitle}>Notification</Text>
+              <TouchableOpacity onPress={() => setSelectedNotification(null)} style={{ padding: 8, marginLeft: 12 }}>
+                <Icon name="times" size={26} color="#2c3e50" />
+              </TouchableOpacity>
+            </View>
+            
+            <ScrollView style={styles.notificationDetailContainer} contentContainerStyle={{ paddingVertical: 20, paddingHorizontal: 20 }}>
+              <View style={styles.notificationDetailTypeTag}>
+                <Text style={styles.notificationDetailTypeIcon}>
+                  {selectedNotification.type === 'announcement' ? '📢' : selectedNotification.type === 'alert' ? '⚠️' : selectedNotification.type === 'event' ? '📅' : selectedNotification.type === 'facility-update' ? '🏢' : selectedNotification.type === 'emergency' ? '🚨' : '📌'}
+                </Text>
+                <Text style={styles.notificationDetailTypeText}>
+                  {selectedNotification.type.replace('-', ' ')}
+                </Text>
+              </View>
+
+              <Text style={styles.notificationDetailMainTitle}>{selectedNotification.title}</Text>
+              <Text style={styles.notificationDetailMessage}>{selectedNotification.message}</Text>
+
+              {selectedNotification.type === 'event' && selectedNotification.metadata && (
+                <View style={[styles.notificationDetailMetadata, { borderLeftColor: '#3498db' }]}>
+                  <Text style={styles.notificationDetailMetadataTitle}>📅 Event Details</Text>
+                  {selectedNotification.metadata.eventDate && (
+                    <View style={styles.notificationDetailMetadataRow}>
+                      <Text style={styles.notificationDetailMetadataLabel}>Date:</Text>
+                      <Text style={styles.notificationDetailMetadataValue}>{new Date(selectedNotification.metadata.eventDate).toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric', year: 'numeric' })}</Text>
+                    </View>
+                  )}
+                  {selectedNotification.metadata.eventTime && (
+                    <View style={styles.notificationDetailMetadataRow}>
+                      <Text style={styles.notificationDetailMetadataLabel}>Time:</Text>
+                      <Text style={styles.notificationDetailMetadataValue}>{selectedNotification.metadata.eventTime}</Text>
+                    </View>
+                  )}
+                  {selectedNotification.metadata.location && (
+                    <View style={styles.notificationDetailMetadataRow}>
+                      <Text style={styles.notificationDetailMetadataLabel}>📍 Location:</Text>
+                      <Text style={styles.notificationDetailMetadataValue}>{selectedNotification.metadata.location}</Text>
+                    </View>
+                  )}
+                </View>
+              )}
+
+              {selectedNotification.type === 'facility-update' && selectedNotification.metadata && (
+                <View style={[styles.notificationDetailMetadata, { borderLeftColor: '#27ae60' }]}>
+                  <Text style={styles.notificationDetailMetadataTitle}>🏢 Facility Update</Text>
+                  {selectedNotification.metadata.facilityName && (
+                    <View style={styles.notificationDetailMetadataRow}>
+                      <Text style={styles.notificationDetailMetadataLabel}>Facility:</Text>
+                      <Text style={styles.notificationDetailMetadataValue}>{selectedNotification.metadata.facilityName}</Text>
+                    </View>
+                  )}
+                  {selectedNotification.metadata.updateType && (
+                    <View style={styles.notificationDetailMetadataRow}>
+                      <Text style={styles.notificationDetailMetadataLabel}>Type:</Text>
+                      <Text style={styles.notificationDetailMetadataValue}>{selectedNotification.metadata.updateType}</Text>
+                    </View>
+                  )}
+                </View>
+              )}
+
+              {selectedNotification.type === 'emergency' && (
+                <View style={[styles.notificationDetailMetadata, { borderLeftColor: '#e74c3c', backgroundColor: '#ffe8e8' }]}>
+                  <Text style={[styles.notificationDetailMetadataTitle, { color: '#c0392b' }]}>🚨 Emergency Alert</Text>
+                  <Text style={{ fontSize: 13, color: '#555', marginTop: 8 }}>Please follow emergency procedures and updates from campus authorities.</Text>
+                </View>
+              )}
+
+              {selectedNotification.priority === 'high' && (
+                <View style={[styles.notificationDetailMetadata, { borderLeftColor: '#e67e22', backgroundColor: '#fef5e7' }]}>
+                  <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+                    <Text style={{ fontSize: 14, marginRight: 8 }}>⚡</Text>
+                    <Text style={[styles.notificationDetailMetadataLabel, { color: '#d68910' }]}>High Priority Notification</Text>
+                  </View>
+                </View>
+              )}
+
+              <View style={{ marginTop: 16, paddingTop: 16, borderTopWidth: 1, borderTopColor: '#e0e0e0' }}>
+                <Text style={{ fontSize: 12, color: '#999', marginBottom: 12 }}>
+                  Sent {new Date(selectedNotification.createdAt).toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric', year: 'numeric', hour: '2-digit', minute: '2-digit' })}
+                </Text>
+              </View>
+              
+              {(selectedNotification.metadata?.pinId || selectedNotification.metadata?.facilityId) && (
+                <TouchableOpacity
+                  style={styles.notificationViewMapButton}
+                  onPress={() => handleNotificationPinPress(selectedNotification.metadata.pinId || selectedNotification.metadata.facilityId)}
+                  activeOpacity={0.85}
+                >
+                  <Icon name="map-marker" size={20} color="white" />
+                  <Text style={styles.notificationViewMapButtonText}>View on Map</Text>
+                </TouchableOpacity>
+              )}
+            </ScrollView>
+          </View>
+        </View>
+      )}
+      
     </View>
   );
 };

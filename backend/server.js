@@ -31,6 +31,8 @@ app.use('/api/pins', require('./routes/pins'));
 app.use('/api/auth', require('./routes/auth'));
 app.use('/api/campuses', require('./routes/campuses'));
 app.use('/api/feedbacks', require('./routes/feedbacks'));
+app.use('/api/admin', require('./routes/admin'));
+app.use('/api/notifications', require('./routes/notifications'));
 
 // MongoDB Connection
 const connectDB = async () => {

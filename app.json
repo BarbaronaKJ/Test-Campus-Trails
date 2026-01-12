@@ -1,7 +1,7 @@
 {
   "expo": {
     "name": "Campus Trails",
-    "slug": "interactive-map",
+    "slug": "Campus-Trails",
     "version": "1.0.0",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
@@ -27,7 +27,7 @@
     },
     "extra": {
       "eas": {
-        "projectId": "48792f3f-3508-4f6d-85b4-66e6300d739f"
+        "projectId": "a00a585e-d431-4c34-ab58-c2840bae646c"
       }
     }
   }
