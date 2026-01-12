@@ -82,6 +82,27 @@ const userSchema = new mongoose.Schema({
     }
   }],
   
+  // User activity data (cross-campus tracking)
+  activity: {
+    // Saved pins with full pin data for quick access
+    savedPins: {
+      type: [mongoose.Schema.Types.Mixed],
+      default: []
+    },
+    // Feedback history
+    feedbackHistory: {
+      type: [{
+        category: String,
+        comment: String,
+        timestamp: {
+          type: Date,
+          default: Date.now
+        }
+      }],
+      default: []
+    }
+  },
+  
   // Timestamps
   createdAt: {
     type: Date,

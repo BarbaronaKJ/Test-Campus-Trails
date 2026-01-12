@@ -10,7 +10,7 @@
     "dev": "concurrently --kill-others-on-fail -n \"BACKEND,FRONTEND\" -c \"bgBlue.bold,bgMagenta.bold\" \"npm run backend\" \"npm run frontend\"",
     "dev:ngrok": "concurrently --kill-others-on-fail -n \"BACKEND,FRONTEND,NGROK\" -c \"bgBlue.bold,bgMagenta.bold,bgGreen.bold\" \"npm run backend\" \"npm run frontend\" \"npm run ngrok\"",
     "backend": "cd backend && npm start",
-    "frontend": "expo start",
+    "frontend": "cross-env EXPO_OFFLINE=1 expo start --tunnel",
     "ngrok": "ngrok http 3000"
   },
   "dependencies": {
@@ -35,6 +35,7 @@
   "devDependencies": {
     "@babel/core": "^7.20.0",
     "concurrently": "^9.1.0",
+    "cross-env": "^10.1.0",
     "react-native-svg-transformer": "^1.5.2"
   },
   "private": true

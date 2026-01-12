@@ -172,6 +172,123 @@ router.post('/', async (req, res) => {
 });
 
 /**
+ * POST /api/feedbacks/batch
+ * Create multiple feedbacks in batch (requires authentication)
+ * Request Body: { feedbacks: [{ pinId, campusId, comment, rating (optional) }] }
+ * Returns: { success, data: { created, failed, results } }
+ */
+router.post('/batch', async (req, res) => {
+  try {
+    const { feedbacks } = req.body;
+    
+    // Get userId from token (if authentication middleware is added)
+    const userId = req.body.userId || req.headers['x-user-id'];
+    
+    if (!userId) {
+      return res.status(401).json({
+        success: false,
+        message: 'User authentication required'
+      });
+    }
+    
+    if (!feedbacks || !Array.isArray(feedbacks) || feedbacks.length === 0) {
+      return res.status(400).json({
+        success: false,
+        message: 'feedbacks array is required and must not be empty'
+      });
+    }
+    
+    // Validate and process each feedback
+    const results = [];
+    const created = [];
+    const failed = [];
+    
+    for (let i = 0; i < feedbacks.length; i++) {
+      const feedbackItem = feedbacks[i];
+      const { pinId, campusId, comment, rating } = feedbackItem;
+      
+      try {
+        // Validate required fields
+        if (!pinId || !campusId || !comment) {
+          failed.push({
+            index: i,
+            pinId,
+            error: 'Missing required fields: pinId, campusId, comment'
+          });
+          continue;
+        }
+        
+        // Validate comment length
+        if (comment.trim().length > 500) {
+          failed.push({
+            index: i,
+            pinId,
+            error: 'Comment cannot exceed 500 characters'
+          });
+          continue;
+        }
+        
+        // Verify pin exists and belongs to campus
+        const pin = await Pin.findOne({ _id: pinId, campusId });
+        if (!pin) {
+          failed.push({
+            index: i,
+            pinId,
+            error: 'Pin not found for this campus'
+          });
+          continue;
+        }
+        
+        // Create feedback
+        const feedbackData = {
+          userId,
+          pinId,
+          campusId,
+          comment: comment.trim(),
+          rating: rating || null
+        };
+        
+        const feedback = await Feedback.createFeedback(feedbackData);
+        created.push(feedback);
+        results.push({
+          index: i,
+          pinId,
+          success: true,
+          feedbackId: feedback._id
+        });
+      } catch (error) {
+        console.error(`Error creating feedback ${i}:`, error);
+        failed.push({
+          index: i,
+          pinId,
+          error: error.message
+        });
+      }
+    }
+    
+    // Return results
+    res.status(created.length > 0 ? 201 : 400).json({
+      success: created.length > 0,
+      message: `Created ${created.length} feedback(s), ${failed.length} failed`,
+      data: {
+        created: created.length,
+        failed: failed.length,
+        results,
+        createdFeedbacks: created,
+        failedFeedbacks: failed
+      }
+    });
+  } catch (error) {
+    console.error('Error creating batch feedbacks:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Error creating batch feedbacks',
+      error: error.message
+    });
+  }
+});
+
+/**
  * PUT /api/feedbacks/:id
  * Update a feedback (requires authentication - user can only update their own)
  * Request Body: { comment, rating (optional) }

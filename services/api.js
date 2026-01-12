@@ -6,33 +6,29 @@
 // API Base URL - Update this with your backend server URL
 // For development: 'http://localhost:3000' (when testing on emulator/simulator)
 // For production: 'https://your-backend-domain.com' (your deployed backend URL)
-// For physical device testing: Use NGROK or your computer's local IP address (e.g., 'http://192.168.1.100:3000')
+// For physical device testing: Use your computer's local IP address (e.g., 'http://192.168.1.100:3000')
 // 
-// NGROK Setup:
-// 1. Configure auth token: ngrok config add-authtoken YOUR_TOKEN
-// 2. Start backend server: cd backend && npm start
-// 3. Start NGROK: ngrok http 3000
-// 4. Copy the HTTPS URL (e.g., https://xxxx-xx-xx-xx-xx.ngrok-free.app)
-// 5. Set NGROK_URL environment variable or update the URL below
+// Setup for Physical Devices:
+// 1. Find your computer's local IP address:
+//    Windows: ipconfig (look for IPv4 Address)
+//    Mac/Linux: ifconfig or ip addr show
+// 2. Ensure your phone and computer are on the same WiFi network
+// 3. Set LOCAL_IP below to your computer's IP address
+// 4. Start backend server: cd backend && npm start
+// 5. Make sure Windows Firewall allows connections on port 3000
 //
 // Note: For Android emulator, use 10.0.2.2 instead of localhost
 // Note: For iOS simulator, use localhost
-// Note: For physical devices, use NGROK URL or your computer's local network IP address
 
 import { Platform } from 'react-native';
 
-// NGROK URL - Update this with your NGROK HTTPS URL when testing on physical devices
-// Get your NGROK URL by running: ngrok http 3000
-// Example: 'https://xxxx-xx-xx-xx-xx.ngrok-free.app'
-const NGROK_URL =   'https://hypermagical-uncondoned-elfrieda.ngrok-free.dev'; // Set to your NGROK URL (e.g., 'https://xxxx-xx-xx-xx-xx.ngrok-free.app') or null to use default
+// LOCAL IP - Set this to your computer's local IP address when testing on physical devices
+// Find your IP: Windows (ipconfig), Mac/Linux (ifconfig)
+// Example: '192.168.1.100' or '192.168.0.105'
+const LOCAL_IP = '192.168.1.39'; // Set to your local IP (e.g., '192.168.1.100') or null for emulator/simulator
 
 // Determine the correct API URL based on platform
 const determineApiBaseUrl = () => {
-  // If NGROK URL is set, use it (for physical device testing)
-  if (NGROK_URL) {
-    return NGROK_URL;
-  }
-
   if (!__DEV__) {
     // Production - update with your deployed backend URL
     return 'https://your-backend-domain.com';
@@ -40,14 +36,18 @@ const determineApiBaseUrl = () => {
 
   // Development mode - use platform-specific URLs
   if (Platform.OS === 'android') {
+    // If LOCAL_IP is set, use it for physical device
+    if (LOCAL_IP) {
+      return `http://${LOCAL_IP}:3000`;
+    }
     // Android emulator uses 10.0.2.2 to access host machine's localhost
-    // For physical Android device, replace with your computer's local IP (e.g., 'http://192.168.1.100:3000')
-    // Or set NGROK_URL above for NGROK tunneling
     return 'http://10.0.2.2:3000';
   } else if (Platform.OS === 'ios') {
+    // If LOCAL_IP is set, use it for physical device
+    if (LOCAL_IP) {
+      return `http://${LOCAL_IP}:3000`;
+    }
     // iOS simulator can use localhost
-    // For physical iOS device, replace with your computer's local IP (e.g., 'http://192.168.1.100:3000')
-    // Or set NGROK_URL above for NGROK tunneling
     return 'http://localhost:3000';
   } else {
     // Web platform
@@ -529,6 +529,137 @@ export const fetchAllCampuses = async () => {
     }
   } catch (error) {
     console.error('Error fetching all campuses from API:', error);
+    throw error;
+  }
+};
+
+/**
+ * Feedback API endpoints
+ */
+
+/**
+ * Create a new feedback (requires authentication)
+ * @param {string} token - JWT authentication token
+ * @param {string} userId - User ID
+ * @param {string} pinId - Pin ID (building)
+ * @param {string} campusId - Campus ID
+ * @param {string} comment - Feedback comment
+ * @param {number} rating - Rating (1-5)
+ * @returns {Promise<Object>} Created feedback object
+ */
+export const createFeedback = async (token, userId, pinId, campusId, comment, rating) => {
+  try {
+    const response = await fetch(`${API_BASE_URL}/api/feedbacks`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${token}`,
+        'x-user-id': userId,
+      },
+      body: JSON.stringify({ userId, pinId, campusId, comment, rating }),
+    });
+
+    const data = await response.json();
+
+    if (!response.ok) {
+      throw new Error(data.message || 'Failed to create feedback');
+    }
+
+    return data.data;
+  } catch (error) {
+    console.error('Create feedback error:', error);
+    throw error;
+  }
+};
+
+/**
+ * Create multiple feedbacks in batch (requires authentication)
+ * @param {string} token - JWT authentication token
+ * @param {string} userId - User ID
+ * @param {Array} feedbacks - Array of feedback objects with { pinId, campusId, comment, rating }
+ * @returns {Promise<Object>} Batch result with { created, failed, results }
+ */
+export const createBatchFeedback = async (token, userId, feedbacks) => {
+  try {
+    const response = await fetch(`${API_BASE_URL}/api/feedbacks/batch`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${token}`,
+        'x-user-id': userId,
+      },
+      body: JSON.stringify({ userId, feedbacks }),
+    });
+
+    const data = await response.json();
+
+    if (!response.ok) {
+      throw new Error(data.message || 'Failed to create batch feedback');
+    }
+
+    return data.data;
+  } catch (error) {
+    console.error('Create batch feedback error:', error);
+    throw error;
+  }
+};
+
+/**
+ * Get feedbacks for a specific user
+ * @param {string} userId - User ID
+ * @param {string} campusId - Optional campus ID to filter by
+ * @returns {Promise<Array>} Array of feedback objects
+ */
+export const getUserFeedbacks = async (userId, campusId = null) => {
+  try {
+    const url = campusId 
+      ? `${API_BASE_URL}/api/feedbacks/user/${userId}?campusId=${campusId}`
+      : `${API_BASE_URL}/api/feedbacks/user/${userId}`;
+    
+    const response = await fetch(url, {
+      method: 'GET',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+    });
+
+    const data = await response.json();
+
+    if (!response.ok) {
+      throw new Error(data.message || 'Failed to fetch feedbacks');
+    }
+
+    return data.data || [];
+  } catch (error) {
+    console.error('Get user feedbacks error:', error);
+    throw error;
+  }
+};
+
+/**
+ * Get feedbacks for a specific pin
+ * @param {string} pinId - Pin ID
+ * @param {string} campusId - Campus ID (required)
+ * @returns {Promise<Array>} Array of feedback objects
+ */
+export const getPinFeedbacks = async (pinId, campusId) => {
+  try {
+    const response = await fetch(`${API_BASE_URL}/api/feedbacks/pin/${pinId}?campusId=${campusId}`, {
+      method: 'GET',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+    });
+
+    const data = await response.json();
+
+    if (!response.ok) {
+      throw new Error(data.message || 'Failed to fetch feedbacks');
+    }
+
+    return data.data || [];
+  } catch (error) {
+    console.error('Get pin feedbacks error:', error);
     throw error;
   }
 };

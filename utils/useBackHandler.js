@@ -19,6 +19,7 @@ export const useBackHandler = ({
   isAuthModalVisible,
   isUserProfileVisible,
   isFeedbackModalVisible,
+  isBuildingSelectionModalVisible,
   setBuildingDetailsVisible,
   setModalVisible,
   setCameFromPinDetails,
@@ -37,6 +38,9 @@ export const useBackHandler = ({
   setAuthModalVisible,
   setUserProfileVisible,
   setFeedbackModalVisible,
+  setIsBuildingSelectionModalVisible,
+  setSelectedBuildingsForFeedback,
+  setBuildingSearchQuery,
 }) => {
   useEffect(() => {
     const backHandler = BackHandler.addEventListener('hardwareBackPress', () => {
@@ -118,6 +122,14 @@ export const useBackHandler = ({
       // Feedback Modal
       if (isFeedbackModalVisible) {
         setFeedbackModalVisible(false);
+        return true;
+      }
+      
+      // Building Selection Modal
+      if (isBuildingSelectionModalVisible) {
+        setIsBuildingSelectionModalVisible(false);
+        setSelectedBuildingsForFeedback([]);
+        setBuildingSearchQuery('');
         return true;
       }
       

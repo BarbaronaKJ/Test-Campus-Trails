@@ -18,7 +18,7 @@ import { usePins } from './utils/usePins';
 import { getProfilePictureUrl, uploadToCloudinaryDirect, CLOUDINARY_CONFIG } from './utils/cloudinaryUtils';
 import * as ImagePicker from 'expo-image-picker';
 import { loadUserData, saveUserData, addFeedback, addSavedPin, removeSavedPin, getActivityStats, updateSettings, updateProfile } from './utils/userStorage';
-import { register, login, getCurrentUser, updateUserProfile, updateUserActivity, changePassword, logout, fetchCampuses, forgotPassword } from './services/api';
+import { register, login, getCurrentUser, updateUserProfile, updateUserActivity, changePassword, logout, fetchCampuses, forgotPassword, createFeedback, createBatchFeedback, getUserFeedbacks, getPinFeedbacks } from './services/api';
 import { useBackHandler } from './utils/useBackHandler';
 
 const { width, height } = Dimensions.get('window');
@@ -110,8 +110,7 @@ const App = () => {
               profilePicture: user.profilePicture || null,
             });
             
-            // Update saved pins and feedback history
-            // Ensure saved pins have image property by fetching full pin data
+            // Update saved pins - ensure they have image property by fetching full pin data
             if (user.activity) {
               const savedPinsFromDB = user.activity.savedPins || [];
               // If we have pins loaded, enrich saved pins with image data
@@ -124,7 +123,31 @@ const App = () => {
               } else {
                 setSavedPins(savedPinsFromDB);
               }
-              setFeedbackHistory(user.activity.feedbackHistory || []);
+            }
+            
+            // Fetch feedbacks from MongoDB Feedback collection
+            try {
+              const userFeedbacks = await getUserFeedbacks(user._id);
+              
+              // Transform MongoDB feedbacks to match app format
+              const transformedFeedbacks = userFeedbacks.map(feedback => {
+                // Find the pin to get its title
+                const pin = pins.find(p => p._id === feedback.pinId);
+                return {
+                  id: feedback._id,
+                  pinId: pin?.id || feedback.pinId,
+                  pinTitle: pin?.title || feedback.pinId?.title || 'Unknown Building',
+                  rating: feedback.rating || 5,
+                  comment: feedback.comment,
+                  date: feedback.createdAt || new Date().toISOString(),
+                };
+              });
+              
+              setFeedbackHistory(transformedFeedbacks);
+            } catch (feedbackError) {
+              console.error('Error fetching feedbacks on restore:', feedbackError);
+              // Continue with empty feedback history if fetch fails
+              setFeedbackHistory([]);
             }
             
             // Update settings
@@ -330,6 +353,16 @@ const App = () => {
   const [feedbackRating, setFeedbackRating] = useState(5);
   const [feedbackModalRendered, setFeedbackModalRendered] = useState(false);
   const feedbackModalFadeAnim = useRef(new Animated.Value(0)).current;
+  
+  // Building Selection Modal State (for multi-building feedback)
+  const [isBuildingSelectionModalVisible, setIsBuildingSelectionModalVisible] = useState(false);
+  const [selectedBuildingsForFeedback, setSelectedBuildingsForFeedback] = useState([]);
+  const [buildingSearchQuery, setBuildingSearchQuery] = useState('');
+  
+  // Multi-Building Feedback Flow State
+  const [feedbackForMultipleBuildings, setFeedbackForMultipleBuildings] = useState(false);
+  const [currentBuildingIndex, setCurrentBuildingIndex] = useState(0);
+  const [buildingFeedbacks, setBuildingFeedbacks] = useState([]);
   
   // Fullscreen Image Viewer State
   const [isFullscreenImageVisible, setFullscreenImageVisible] = useState(false);
@@ -903,6 +936,10 @@ const App = () => {
     setAuthModalVisible,
     setUserProfileVisible,
     setFeedbackModalVisible,
+    isBuildingSelectionModalVisible,
+    setIsBuildingSelectionModalVisible,
+    setSelectedBuildingsForFeedback,
+    setBuildingSearchQuery,
   });
 
   
@@ -1137,6 +1174,228 @@ const App = () => {
     const obj = {};
     allCategoryKeys.forEach(k => obj[k] = true);
     setSelectedCategories(obj);
+  };
+
+  // Helper functions for building-specific feedback
+  
+  // Get all selectable buildings (visible pins only, no waypoints/invisible pins)
+  const getSelectableBuildings = () => {
+    if (!pins || pins.length === 0) return [];
+    
+    return pins
+      .filter(pin => !pin.isInvisible && pin.title && pin.description)
+      .sort((a, b) => {
+        // Sort by building number if title is numeric, otherwise alphabetically
+        const aNum = parseInt(a.title);
+        const bNum = parseInt(b.title);
+        if (!isNaN(aNum) && !isNaN(bNum)) {
+          return aNum - bNum;
+        }
+        return (a.title || '').localeCompare(b.title || '');
+      });
+  };
+  
+  // Toggle building selection
+  const handleBuildingSelection = (buildingId) => {
+    setSelectedBuildingsForFeedback(prev => {
+      if (prev.includes(buildingId)) {
+        return prev.filter(id => id !== buildingId);
+      } else {
+        return [...prev, buildingId];
+      }
+    });
+  };
+  
+  // Start multi-building feedback flow
+  const startMultiBuildingFeedback = () => {
+    if (selectedBuildingsForFeedback.length === 0) {
+      Alert.alert('No Buildings Selected', 'Please select at least one building to review.');
+      return;
+    }
+    
+    // Initialize feedback flow
+    setFeedbackForMultipleBuildings(true);
+    setCurrentBuildingIndex(0);
+    setBuildingFeedbacks([]);
+    setFeedbackComment('');
+    setFeedbackRating(5);
+    
+    // Close building selection modal and open feedback modal
+    setIsBuildingSelectionModalVisible(false);
+    setFeedbackModalVisible(true);
+  };
+  
+  // Save current building's feedback and move to next
+  const saveCurrentBuildingFeedback = (action = 'next') => {
+    const currentBuilding = pins.find(p => p.id === selectedBuildingsForFeedback[currentBuildingIndex]);
+    if (!currentBuilding) return;
+    
+    // Save feedback for current building (even if skipped, we save rating with empty comment)
+    const feedbackEntry = {
+      buildingId: currentBuilding.id,
+      buildingTitle: currentBuilding.description || currentBuilding.title,
+      rating: feedbackRating,
+      comment: feedbackComment.trim(),
+      skipped: action === 'skip',
+    };
+    
+    // Update buildingFeedbacks array
+    const updatedFeedbacks = [...buildingFeedbacks];
+    updatedFeedbacks[currentBuildingIndex] = feedbackEntry;
+    setBuildingFeedbacks(updatedFeedbacks);
+    
+    if (action === 'next' && currentBuildingIndex < selectedBuildingsForFeedback.length - 1) {
+      // Move to next building
+      setCurrentBuildingIndex(currentBuildingIndex + 1);
+      setFeedbackComment('');
+      setFeedbackRating(5);
+    } else if (action === 'previous' && currentBuildingIndex > 0) {
+      // Move to previous building and load its saved feedback
+      const prevIndex = currentBuildingIndex - 1;
+      const prevFeedback = buildingFeedbacks[prevIndex];
+      setCurrentBuildingIndex(prevIndex);
+      if (prevFeedback) {
+        setFeedbackComment(prevFeedback.comment || '');
+        setFeedbackRating(prevFeedback.rating || 5);
+      } else {
+        setFeedbackComment('');
+        setFeedbackRating(5);
+      }
+    } else if (action === 'skip') {
+      // Skip and move to next or submit if last
+      if (currentBuildingIndex < selectedBuildingsForFeedback.length - 1) {
+        setCurrentBuildingIndex(currentBuildingIndex + 1);
+        setFeedbackComment('');
+        setFeedbackRating(5);
+      } else {
+        // Last building, submit all
+        submitBatchFeedback(updatedFeedbacks);
+      }
+    } else {
+      // Last building, submit all
+      submitBatchFeedback(updatedFeedbacks);
+    }
+  };
+  
+  // Submit all building feedbacks in batch
+  const submitBatchFeedback = async (feedbacksToSubmit = buildingFeedbacks) => {
+    try {
+      // Filter out skipped feedbacks or those with no comment
+      const validFeedbacks = feedbacksToSubmit.filter(f => !f.skipped && f.comment && f.comment.length > 5);
+      
+      if (validFeedbacks.length === 0) {
+        Alert.alert('No Feedback', 'You did not provide feedback for any building.');
+        // Reset state
+        resetFeedbackFlow();
+        return;
+      }
+      
+      // Save to MongoDB if logged in
+      if (isLoggedIn && authToken && currentUser) {
+        try {
+          // Prepare feedback data for MongoDB Feedback collection
+          const feedbacksForAPI = validFeedbacks.map(f => {
+            // Find the pin to get its campusId
+            const pin = pins.find(p => p.id === f.buildingId);
+            return {
+              pinId: pin?._id || f.buildingId, // Use MongoDB _id if available
+              campusId: pin?.campusId || null, // Get campusId from pin
+              comment: f.comment,
+              rating: f.rating
+            };
+          });
+          
+          // Save to MongoDB Feedback collection
+          const result = await createBatchFeedback(authToken, currentUser._id, feedbacksForAPI);
+          
+          // Create local feedback entries for display
+          const feedbackEntries = result.results.map((r, index) => ({
+            id: r._id,
+            pinId: validFeedbacks[index].buildingId,
+            pinTitle: validFeedbacks[index].buildingTitle,
+            rating: validFeedbacks[index].rating,
+            comment: validFeedbacks[index].comment,
+            date: r.createdAt || new Date().toISOString(),
+          }));
+          
+          // Update local state
+          const updatedFeedbackHistory = [...feedbackHistory, ...feedbackEntries];
+          setFeedbackHistory(updatedFeedbackHistory);
+          
+          // Save to AsyncStorage for offline access
+          for (const entry of feedbackEntries) {
+            await addFeedback({
+              pinId: entry.pinId,
+              pinTitle: entry.pinTitle,
+              rating: entry.rating,
+              comment: entry.comment,
+            });
+          }
+          
+          // Reset state
+          resetFeedbackFlow();
+          
+          // Show success message
+          Alert.alert(
+            'Success',
+            `Thank you for your feedback on ${validFeedbacks.length} building${validFeedbacks.length > 1 ? 's' : ''}!`,
+            [{ text: 'OK', style: 'default' }],
+            { cancelable: false }
+          );
+        } catch (error) {
+          console.error('Error saving batch feedback to MongoDB:', error);
+          Alert.alert('Error', error.message || 'Failed to save feedback. Please try again.');
+        }
+      } else {
+        // Save locally only (not logged in)
+        const feedbackEntries = validFeedbacks.map(f => ({
+          id: Date.now() + Math.random(), // Unique ID
+          pinId: f.buildingId,
+          pinTitle: f.buildingTitle,
+          rating: f.rating,
+          comment: f.comment,
+          date: new Date().toISOString(),
+        }));
+        
+        const updatedFeedbackHistory = [...feedbackHistory, ...feedbackEntries];
+        setFeedbackHistory(updatedFeedbackHistory);
+        
+        // Save to AsyncStorage
+        for (const entry of feedbackEntries) {
+          await addFeedback({
+            pinId: entry.pinId,
+            pinTitle: entry.pinTitle,
+            rating: entry.rating,
+            comment: entry.comment,
+          });
+        }
+        
+        // Reset state
+        resetFeedbackFlow();
+        
+        // Show success message
+        Alert.alert(
+          'Success',
+          `Thank you for your feedback on ${validFeedbacks.length} building${validFeedbacks.length > 1 ? 's' : ''}! (Saved locally)`,
+          [{ text: 'OK', style: 'default' }],
+          { cancelable: false }
+        );
+      }
+    } catch (error) {
+      console.error('Error submitting batch feedback:', error);
+      Alert.alert('Error', 'Failed to submit feedback. Please try again.');
+    }
+  };
+  
+  // Reset feedback flow state
+  const resetFeedbackFlow = () => {
+    setFeedbackModalVisible(false);
+    setFeedbackForMultipleBuildings(false);
+    setCurrentBuildingIndex(0);
+    setBuildingFeedbacks([]);
+    setSelectedBuildingsForFeedback([]);
+    setFeedbackComment('');
+    setFeedbackRating(5);
   };
 
   const clearAllCategories = () => setSelectedCategories({});
@@ -2274,37 +2533,210 @@ const App = () => {
                 )}
 
                 {userProfileTab === 'feedback' && (
-                  <ScrollView contentContainerStyle={{ padding: 20 }}>
+                  <ScrollView contentContainerStyle={{ padding: 20, backgroundColor: '#f5f5f5' }}>
+                    {/* Give Feedback Button */}
+                    <TouchableOpacity
+                      style={[
+                        styles.authButton,
+                        {
+                          backgroundColor: '#28a745',
+                          marginBottom: 24,
+                          flexDirection: 'row',
+                          alignItems: 'center',
+                          justifyContent: 'center',
+                          paddingVertical: 14,
+                          shadowColor: '#28a745',
+                          shadowOffset: { width: 0, height: 2 },
+                          shadowOpacity: 0.3,
+                          shadowRadius: 4,
+                          elevation: 4,
+                        }
+                      ]}
+                      activeOpacity={0.8}
+                      onPress={() => {
+                        if (!isLoggedIn || !authToken) {
+                          Alert.alert(
+                            'Login Required',
+                            'You must be logged in to give feedback. Please login to continue.',
+                            [
+                              { text: 'Cancel', style: 'cancel' },
+                              {
+                                text: 'Login',
+                                onPress: () => {
+                                  setUserProfileVisible(false);
+                                  setAuthModalVisible(true);
+                                },
+                              },
+                            ]
+                          );
+                          return;
+                        }
+                        setIsBuildingSelectionModalVisible(true);
+                      }}
+                    >
+                      <Icon name="plus-circle" size={18} color="white" style={{ marginRight: 8 }} />
+                      <Text style={[styles.authButtonText, { fontWeight: '600' }]}>Give Feedback on Buildings</Text>
+                    </TouchableOpacity>
+                    
                     {feedbackHistory.length === 0 ? (
-                      <View style={{ alignItems: 'center', padding: 40 }}>
-                        <Icon name="star-o" size={48} color="#ccc" />
-                        <Text style={{ marginTop: 16, color: '#666', fontSize: 16 }}>No feedback yet</Text>
-                        <Text style={{ marginTop: 8, color: '#999', fontSize: 14, textAlign: 'center' }}>Give feedback on buildings to see your review history here</Text>
+                      <View style={{
+                        alignItems: 'center',
+                        padding: 60,
+                        backgroundColor: 'white',
+                        borderRadius: 16,
+                        shadowColor: '#000',
+                        shadowOffset: { width: 0, height: 2 },
+                        shadowOpacity: 0.08,
+                        shadowRadius: 8,
+                        elevation: 2,
+                      }}>
+                        <Icon name="star-o" size={64} color="#d0d0d0" />
+                        <Text style={{
+                          marginTop: 20,
+                          color: '#1a1a1a',
+                          fontSize: 18,
+                          fontWeight: '600',
+                        }}>No feedback yet</Text>
+                        <Text style={{
+                          marginTop: 10,
+                          color: '#6c757d',
+                          fontSize: 15,
+                          textAlign: 'center',
+                          lineHeight: 22,
+                          paddingHorizontal: 20,
+                        }}>
+                          Share your experience! Give feedback on buildings to help other students.
+                        </Text>
                       </View>
                     ) : (
-                      feedbackHistory.map((feedback) => (
-                        <View key={feedback.id} style={[styles.facilityButton, { backgroundColor: 'white', marginBottom: 12, padding: 15 }]}>
-                          <View style={{ flexDirection: 'row', alignItems: 'center', marginBottom: 8 }}>
-                            <Text style={[styles.facilityName, { flex: 1 }]}>{feedback.pinTitle}</Text>
-                            <View style={{ flexDirection: 'row' }}>
-                              {[1, 2, 3, 4, 5].map((star) => (
-                                <Icon
-                                  key={star}
-                                  name={star <= feedback.rating ? 'star' : 'star-o'}
-                                  size={16}
-                                  color={star <= feedback.rating ? '#ffc107' : '#ccc'}
-                                />
-                              ))}
+                      feedbackHistory.map((feedback) => {
+                        // Determine rating color and category
+                        const getRatingColor = (rating) => {
+                          if (rating >= 5) return { border: '#28a745', bg: '#e8f5e9', badge: '#28a745', text: 'Excellent' };
+                          if (rating >= 4) return { border: '#5cb85c', bg: '#f0f8f0', badge: '#5cb85c', text: 'Good' };
+                          if (rating >= 3) return { border: '#ffc107', bg: '#fff9e6', badge: '#ffc107', text: 'Average' };
+                          if (rating >= 2) return { border: '#fd7e14', bg: '#fff3e0', badge: '#fd7e14', text: 'Fair' };
+                          return { border: '#dc3545', bg: '#ffebee', badge: '#dc3545', text: 'Poor' };
+                        };
+                        
+                        const ratingStyle = getRatingColor(feedback.rating);
+                        
+                        // Format date
+                        const formatDate = (dateString) => {
+                          const date = new Date(dateString);
+                          const now = new Date();
+                          const diffTime = Math.abs(now - date);
+                          const diffDays = Math.floor(diffTime / (1000 * 60 * 60 * 24));
+                          
+                          if (diffDays === 0) return 'Today';
+                          if (diffDays === 1) return 'Yesterday';
+                          if (diffDays < 7) return `${diffDays} days ago`;
+                          
+                          return date.toLocaleDateString('en-US', { 
+                            month: 'short', 
+                            day: 'numeric', 
+                            year: date.getFullYear() !== now.getFullYear() ? 'numeric' : undefined 
+                          });
+                        };
+                        
+                        return (
+                          <View
+                            key={feedback.id}
+                            style={{
+                              backgroundColor: 'white',
+                              marginBottom: 16,
+                              padding: 18,
+                              borderRadius: 14,
+                              borderLeftWidth: 5,
+                              borderLeftColor: ratingStyle.border,
+                              shadowColor: '#000',
+                              shadowOffset: { width: 0, height: 3 },
+                              shadowOpacity: 0.12,
+                              shadowRadius: 6,
+                              elevation: 4,
+                            }}
+                          >
+                            {/* Building Name with Icon */}
+                            <View style={{ flexDirection: 'row', alignItems: 'center', marginBottom: 12 }}>
+                              <View style={{
+                                width: 36,
+                                height: 36,
+                                borderRadius: 8,
+                                backgroundColor: ratingStyle.bg,
+                                alignItems: 'center',
+                                justifyContent: 'center',
+                                marginRight: 12,
+                              }}>
+                                <Icon name="building" size={18} color={ratingStyle.badge} />
+                              </View>
+                              <Text style={{
+                                flex: 1,
+                                fontSize: 16,
+                                fontWeight: '600',
+                                color: '#1a1a1a',
+                                lineHeight: 22,
+                              }} numberOfLines={2}>
+                                {feedback.pinTitle}
+                              </Text>
                             </View>
+                            
+                            {/* Rating Section */}
+                            <View style={{
+                              flexDirection: 'row',
+                              alignItems: 'center',
+                              marginBottom: 12,
+                            }}>
+                              <View style={{
+                                flexDirection: 'row',
+                                alignItems: 'center',
+                                backgroundColor: ratingStyle.bg,
+                                paddingHorizontal: 12,
+                                paddingVertical: 8,
+                                borderRadius: 20,
+                              }}>
+                                <Text style={{
+                                  fontSize: 16,
+                                  fontWeight: '700',
+                                  color: ratingStyle.badge,
+                                  marginRight: 6,
+                                }}>
+                                  {feedback.rating}.0
+                                </Text>
+                                <View style={{ flexDirection: 'row' }}>
+                                  {[1, 2, 3, 4, 5].map((star) => (
+                                    <Icon
+                                      key={`${feedback.id}-star-${star}`}
+                                      name={star <= feedback.rating ? 'star' : 'star-o'}
+                                      size={18}
+                                      color={star <= feedback.rating ? ratingStyle.badge : '#d0d0d0'}
+                                      style={{ marginHorizontal: 1 }}
+                                    />
+                                  ))}
+                                </View>
+                              </View>
+                            </View>
+                            
+                            {/* Comment Section */}
+                            {feedback.comment && (
+                              <View style={{
+                                backgroundColor: '#f8f9fa',
+                                padding: 14,
+                                borderRadius: 10,
+                                borderLeftWidth: 3,
+                                borderLeftColor: ratingStyle.border,
+                              }}>
+                                <Text style={{
+                                  color: '#495057',
+                                  fontSize: 15,
+                                  lineHeight: 22,
+                                }}>
+                                  {feedback.comment}
+                                </Text>
+                              </View>
+                            )}
                           </View>
-                          {feedback.comment && (
-                            <Text style={{ color: '#666', fontSize: 14, marginTop: 8 }}>{feedback.comment}</Text>
-                          )}
-                          <Text style={{ color: '#999', fontSize: 12, marginTop: 8 }}>
-                            {new Date(feedback.date).toLocaleDateString()}
-                          </Text>
-                        </View>
-                      ))
+                        );
+                      })
                     )}
                   </ScrollView>
                 )}
@@ -2696,6 +3128,355 @@ const App = () => {
         )}
       </Modal>
 
+      {/* Building Selection Modal */}
+      <Modal
+        visible={isBuildingSelectionModalVisible}
+        transparent={true}
+        animationType="slide"
+        onRequestClose={() => setIsBuildingSelectionModalVisible(false)}
+      >
+        <View style={[StyleSheet.absoluteFill, { backgroundColor: 'rgba(0,0,0,0.6)' }]}>
+          <View style={[
+            styles.modalContent,
+            {
+              flex: 1,
+              marginTop: 60,
+              borderTopLeftRadius: 20,
+              borderTopRightRadius: 20,
+              backgroundColor: '#f5f5f5',
+              shadowColor: '#000',
+              shadowOffset: { width: 0, height: -4 },
+              shadowOpacity: 0.3,
+              shadowRadius: 8,
+              elevation: 12,
+            }
+          ]}>
+            {/* Header */}
+            <View style={[
+              styles.modalHeaderWhite,
+              {
+                paddingVertical: 18,
+                paddingHorizontal: 20,
+                borderBottomWidth: 1,
+                borderBottomColor: '#e0e0e0',
+              }
+            ]}>
+              <TouchableOpacity 
+                onPress={() => {
+                  setIsBuildingSelectionModalVisible(false);
+                  setSelectedBuildingsForFeedback([]);
+                  setBuildingSearchQuery('');
+                }}
+                style={{
+                  padding: 10,
+                  marginRight: 10,
+                  borderRadius: 8,
+                  backgroundColor: '#f0f0f0',
+                }}
+                activeOpacity={0.7}
+              >
+                <Icon name="times" size={20} color="#666" />
+              </TouchableOpacity>
+              <Text style={[
+                styles.modalTitleWhite,
+                {
+                  flex: 1,
+                  textAlign: 'center',
+                  marginRight: 40,
+                  fontSize: 18,
+                  fontWeight: '600',
+                  color: '#1a1a1a',
+                }
+              ]}>
+                Select Buildings to Review
+              </Text>
+            </View>
+            
+            {/* Search Bar */}
+            <View style={{
+              padding: 16,
+              backgroundColor: 'white',
+              borderBottomWidth: 1,
+              borderBottomColor: '#e0e0e0',
+            }}>
+              <View style={[
+                styles.searchBar,
+                {
+                  marginBottom: 0,
+                  backgroundColor: '#f8f9fa',
+                  borderRadius: 12,
+                  borderWidth: 1,
+                  borderColor: '#e0e0e0',
+                  paddingHorizontal: 14,
+                  paddingVertical: 10,
+                }
+              ]}>
+                <Icon name="search" size={18} color="#999" style={{ marginRight: 10 }} />
+                <TextInput
+                  style={[styles.searchInput, { flex: 1 }]}
+                  placeholder="Search buildings..."
+                  value={buildingSearchQuery}
+                  onChangeText={setBuildingSearchQuery}
+                  placeholderTextColor="#999"
+                />
+                {buildingSearchQuery.length > 0 && (
+                  <TouchableOpacity onPress={() => setBuildingSearchQuery('')}>
+                    <Icon name="times-circle" size={18} color="#999" />
+                  </TouchableOpacity>
+                )}
+              </View>
+            </View>
+            
+            {/* Buildings List */}
+            <ScrollView style={{ flex: 1, backgroundColor: '#f5f5f5' }}>
+              <View style={{ padding: 16, paddingTop: 12 }}>
+                {getSelectableBuildings()
+                  .filter(building => {
+                    if (!buildingSearchQuery) return true;
+                    const query = buildingSearchQuery.toLowerCase();
+                    const title = (building.title || '').toLowerCase();
+                    const description = (building.description || '').toLowerCase();
+                    return title.includes(query) || description.includes(query);
+                  })
+                  .map(building => (
+                    <TouchableOpacity
+                      key={building.id}
+                      style={[
+                        styles.facilityButton,
+                        {
+                          backgroundColor: 'white',
+                          marginBottom: 12,
+                          borderWidth: 2,
+                          borderRadius: 12,
+                          borderColor: selectedBuildingsForFeedback.includes(building.id) ? '#28a745' : '#e0e0e0',
+                          padding: 12,
+                          shadowColor: selectedBuildingsForFeedback.includes(building.id) ? '#28a745' : '#000',
+                          shadowOffset: { width: 0, height: 2 },
+                          shadowOpacity: selectedBuildingsForFeedback.includes(building.id) ? 0.3 : 0.08,
+                          shadowRadius: 4,
+                          elevation: selectedBuildingsForFeedback.includes(building.id) ? 4 : 2,
+                        }
+                      ]}
+                      onPress={() => handleBuildingSelection(building.id)}
+                    >
+                      {/* Building Image */}
+                      {(() => {
+                        if (building.image) {
+                          const imageSource = typeof building.image === 'string' 
+                            ? { uri: getOptimizedImage(building.image, 100) } 
+                            : building.image;
+                          return (
+                            <ExpoImage
+                              source={imageSource}
+                              style={[
+                                styles.facilityButtonImage,
+                                {
+                                  width: 64,
+                                  height: 64,
+                                  borderRadius: 10,
+                                  backgroundColor: '#f0f0f0',
+                                }
+                              ]}
+                              contentFit="cover"
+                              transition={200}
+                            />
+                          );
+                        } else {
+                          return (
+                            <View style={[
+                              styles.facilityButtonImage,
+                              {
+                                width: 64,
+                                height: 64,
+                                borderRadius: 10,
+                                backgroundColor: '#f0f0f0',
+                                alignItems: 'center',
+                                justifyContent: 'center',
+                              }
+                            ]}>
+                              <Icon name="building" size={28} color="#aaa" />
+                            </View>
+                          );
+                        }
+                      })()}
+                      
+                      {/* Building Info */}
+                      <View style={[styles.facilityButtonContent, { flex: 1, paddingHorizontal: 4 }]}>
+                        <Text style={[
+                          styles.facilityName,
+                          {
+                            fontSize: 15,
+                            marginBottom: 6,
+                            fontWeight: '600',
+                            color: '#1a1a1a',
+                          }
+                        ]}>
+                          {building.title && building.title.length < 4 ? `BLDG ${building.title}` : building.title}
+                        </Text>
+                        <Text style={{ color: '#666', fontSize: 13, lineHeight: 18 }} numberOfLines={2}>
+                          {building.description}
+                        </Text>
+                      </View>
+                      
+                      {/* Checkbox */}
+                      <View style={{
+                        width: 32,
+                        height: 32,
+                        borderRadius: 16,
+                        borderWidth: 2.5,
+                        borderColor: selectedBuildingsForFeedback.includes(building.id) ? '#28a745' : '#d0d0d0',
+                        backgroundColor: selectedBuildingsForFeedback.includes(building.id) ? '#28a745' : 'white',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                        marginLeft: 8,
+                        shadowColor: selectedBuildingsForFeedback.includes(building.id) ? '#28a745' : '#000',
+                        shadowOffset: { width: 0, height: 1 },
+                        shadowOpacity: selectedBuildingsForFeedback.includes(building.id) ? 0.3 : 0.05,
+                        shadowRadius: 2,
+                        elevation: selectedBuildingsForFeedback.includes(building.id) ? 2 : 1,
+                      }}>
+                        {selectedBuildingsForFeedback.includes(building.id) && (
+                          <Icon name="check" size={16} color="white" />
+                        )}
+                      </View>
+                    </TouchableOpacity>
+                  ))}
+                
+                {getSelectableBuildings().filter(building => {
+                  if (!buildingSearchQuery) return true;
+                  const query = buildingSearchQuery.toLowerCase();
+                  const title = (building.title || '').toLowerCase();
+                  const description = (building.description || '').toLowerCase();
+                  return title.includes(query) || description.includes(query);
+                }).length === 0 && (
+                  <View style={{
+                    alignItems: 'center',
+                    padding: 50,
+                    backgroundColor: 'white',
+                    borderRadius: 12,
+                    marginVertical: 20,
+                  }}>
+                    <Icon name="building-o" size={56} color="#d0d0d0" />
+                    <Text style={{
+                      marginTop: 20,
+                      color: '#666',
+                      fontSize: 17,
+                      fontWeight: '600',
+                    }}>No buildings found</Text>
+                    <Text style={{
+                      marginTop: 8,
+                      color: '#999',
+                      fontSize: 14,
+                      textAlign: 'center',
+                    }}>Try a different search term</Text>
+                  </View>
+                )}
+              </View>
+            </ScrollView>
+            
+            {/* Bottom Actions */}
+            <View style={{
+              padding: 18,
+              backgroundColor: 'white',
+              borderTopWidth: 1,
+              borderTopColor: '#e0e0e0',
+              shadowColor: '#000',
+              shadowOffset: { width: 0, height: -2 },
+              shadowOpacity: 0.08,
+              shadowRadius: 8,
+              elevation: 8,
+            }}>
+              <View style={{
+                flexDirection: 'row',
+                alignItems: 'center',
+                marginBottom: 16,
+                paddingHorizontal: 4,
+              }}>
+                <View style={{
+                  width: 32,
+                  height: 32,
+                  borderRadius: 16,
+                  backgroundColor: selectedBuildingsForFeedback.length > 0 ? '#e8f5e9' : '#f5f5f5',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  marginRight: 12,
+                }}>
+                  <Icon
+                    name="check-circle"
+                    size={18}
+                    color={selectedBuildingsForFeedback.length > 0 ? '#28a745' : '#ccc'}
+                  />
+                </View>
+                <Text style={{
+                  color: selectedBuildingsForFeedback.length > 0 ? '#1a1a1a' : '#999',
+                  fontSize: 15,
+                  fontWeight: '500',
+                }}>
+                  {selectedBuildingsForFeedback.length} building{selectedBuildingsForFeedback.length !== 1 ? 's' : ''} selected
+                </Text>
+              </View>
+              <View style={{ flexDirection: 'row' }}>
+                <TouchableOpacity
+                  style={[
+                    styles.authButton,
+                    {
+                      flex: 1,
+                      backgroundColor: 'white',
+                      marginRight: 8,
+                      borderWidth: 2,
+                      borderColor: '#dc3545',
+                      paddingVertical: 14,
+                      shadowColor: '#000',
+                      shadowOffset: { width: 0, height: 2 },
+                      shadowOpacity: 0.1,
+                      shadowRadius: 3,
+                      elevation: 2,
+                    }
+                  ]}
+                  activeOpacity={0.8}
+                  onPress={() => {
+                    setIsBuildingSelectionModalVisible(false);
+                    setSelectedBuildingsForFeedback([]);
+                    setBuildingSearchQuery('');
+                  }}
+                >
+                  <Text style={[styles.authButtonText, { color: '#dc3545', fontWeight: '600' }]}>Cancel</Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={[
+                    styles.authButton,
+                    {
+                      flex: 1,
+                      backgroundColor: selectedBuildingsForFeedback.length > 0 ? '#28a745' : '#e0e0e0',
+                      marginLeft: 8,
+                      paddingVertical: 14,
+                      shadowColor: selectedBuildingsForFeedback.length > 0 ? '#28a745' : '#000',
+                      shadowOffset: { width: 0, height: 2 },
+                      shadowOpacity: selectedBuildingsForFeedback.length > 0 ? 0.3 : 0.05,
+                      shadowRadius: 4,
+                      elevation: selectedBuildingsForFeedback.length > 0 ? 4 : 1,
+                    }
+                  ]}
+                  disabled={selectedBuildingsForFeedback.length === 0}
+                  activeOpacity={0.8}
+                  onPress={startMultiBuildingFeedback}
+                >
+                  <Text style={[
+                    styles.authButtonText,
+                    {
+                      color: selectedBuildingsForFeedback.length > 0 ? 'white' : '#999',
+                      fontWeight: '600',
+                    }
+                  ]}>
+                    Continue ({selectedBuildingsForFeedback.length})
+                  </Text>
+                </TouchableOpacity>
+              </View>
+            </View>
+          </View>
+        </View>
+      </Modal>
+
       {/* Feedback Modal with Fade Animation */}
       <Modal
         visible={feedbackModalRendered}
@@ -2723,28 +3504,151 @@ const App = () => {
                 }
               ]}
             >
-            <View style={styles.modalHeaderWhite}>
-              <Text style={[styles.modalTitleWhite, { marginBottom: 0, flex: 1, textAlign: 'center' }]}>
-                Give Feedback - {selectedPin?.description || selectedPin?.title}
+            <View style={[
+              styles.modalHeaderWhite,
+              {
+                paddingVertical: 18,
+                paddingHorizontal: 20,
+                borderBottomWidth: 1,
+                borderBottomColor: '#e0e0e0',
+              }
+            ]}>
+              {feedbackForMultipleBuildings && (
+                <TouchableOpacity
+                  onPress={() => {
+                    Alert.alert(
+                      'Cancel Feedback',
+                      'Are you sure you want to cancel? Your progress will be lost.',
+                      [
+                        { text: 'No', style: 'cancel' },
+                        {
+                          text: 'Yes',
+                          style: 'destructive',
+                          onPress: () => resetFeedbackFlow(),
+                        },
+                      ]
+                    );
+                  }}
+                  style={{
+                    padding: 10,
+                    position: 'absolute',
+                    left: 16,
+                    top: 14,
+                    zIndex: 10,
+                    borderRadius: 8,
+                    backgroundColor: '#f0f0f0',
+                  }}
+                  activeOpacity={0.7}
+                >
+                  <Icon name="times" size={20} color="#666" />
+                </TouchableOpacity>
+              )}
+              <Text style={[
+                styles.modalTitleWhite,
+                {
+                  marginBottom: 0,
+                  flex: 1,
+                  textAlign: 'center',
+                  fontSize: 17,
+                  fontWeight: '600',
+                  color: '#1a1a1a',
+                  paddingHorizontal: feedbackForMultipleBuildings ? 40 : 20,
+                }
+              ]}>
+                {feedbackForMultipleBuildings
+                  ? `Rate ${pins.find(p => p.id === selectedBuildingsForFeedback[currentBuildingIndex])?.description || 'Building'}`
+                  : `Give Feedback - ${selectedPin?.description || selectedPin?.title}`}
               </Text>
             </View>
+            {feedbackForMultipleBuildings && (
+              <View style={{
+                padding: 16,
+                backgroundColor: '#f8f9fa',
+                alignItems: 'center',
+                borderBottomWidth: 1,
+                borderBottomColor: '#e0e0e0',
+              }}>
+                <Text style={{
+                  color: '#495057',
+                  fontSize: 15,
+                  marginBottom: 12,
+                  fontWeight: '600',
+                }}>
+                  Building {currentBuildingIndex + 1} of {selectedBuildingsForFeedback.length}
+                </Text>
+                <View style={{
+                  flexDirection: 'row',
+                  backgroundColor: 'white',
+                  padding: 8,
+                  borderRadius: 20,
+                  shadowColor: '#000',
+                  shadowOffset: { width: 0, height: 1 },
+                  shadowOpacity: 0.1,
+                  shadowRadius: 2,
+                  elevation: 2,
+                }}>
+                  {selectedBuildingsForFeedback.map((_, index) => (
+                    <View
+                      key={index}
+                      style={{
+                        width: 10,
+                        height: 10,
+                        borderRadius: 5,
+                        backgroundColor: index === currentBuildingIndex ? '#28a745' : index < currentBuildingIndex ? '#6c757d' : '#dee2e6',
+                        marginHorizontal: 4,
+                        borderWidth: index === currentBuildingIndex ? 2 : 0,
+                        borderColor: '#155724',
+                      }}
+                    />
+                  ))}
+                </View>
+              </View>
+            )}
             <View style={styles.lineDark}></View>
             <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : 'height'} style={{ flex: 1, backgroundColor: '#f5f5f5' }}>
-              <ScrollView style={{ padding: 20 }}>
+              <ScrollView style={{ padding: 24 }} showsVerticalScrollIndicator={false}>
                 {/* Rating Section */}
-                <View style={{ marginBottom: 20 }}>
-                  <Text style={[styles.settingLabel, { marginBottom: 12 }]}>Rating</Text>
-                  <View style={{ flexDirection: 'row', justifyContent: 'center' }}>
+                <View style={{
+                  marginBottom: 24,
+                  backgroundColor: 'white',
+                  padding: 20,
+                  borderRadius: 12,
+                  shadowColor: '#000',
+                  shadowOffset: { width: 0, height: 2 },
+                  shadowOpacity: 0.08,
+                  shadowRadius: 4,
+                  elevation: 2,
+                }}>
+                  <Text style={[
+                    styles.settingLabel,
+                    {
+                      marginBottom: 16,
+                      fontSize: 16,
+                      fontWeight: '600',
+                      color: '#1a1a1a',
+                    }
+                  ]}>Rate this building</Text>
+                  <View style={{
+                    flexDirection: 'row',
+                    justifyContent: 'center',
+                    backgroundColor: '#f8f9fa',
+                    padding: 12,
+                    borderRadius: 50,
+                  }}>
                     {[1, 2, 3, 4, 5].map((star) => (
                       <TouchableOpacity
                         key={star}
                         onPress={() => setFeedbackRating(star)}
-                        style={{ padding: 8 }}
+                        style={{
+                          padding: 10,
+                          marginHorizontal: 2,
+                        }}
+                        activeOpacity={0.6}
                       >
                         <Icon
                           name={star <= feedbackRating ? 'star' : 'star-o'}
-                          size={32}
-                          color={star <= feedbackRating ? '#ffc107' : '#ccc'}
+                          size={36}
+                          color={star <= feedbackRating ? '#ffc107' : '#d0d0d0'}
                         />
                       </TouchableOpacity>
                     ))}
@@ -2752,40 +3656,194 @@ const App = () => {
                 </View>
 
                 {/* Comment Section */}
-                <View style={{ marginBottom: 20 }}>
-                  <Text style={[styles.settingLabel, { marginBottom: 12 }]}>Comment</Text>
+                <View style={{
+                  marginBottom: 24,
+                  backgroundColor: 'white',
+                  padding: 20,
+                  borderRadius: 12,
+                  shadowColor: '#000',
+                  shadowOffset: { width: 0, height: 2 },
+                  shadowOpacity: 0.08,
+                  shadowRadius: 4,
+                  elevation: 2,
+                }}>
+                  <Text style={[
+                    styles.settingLabel,
+                    {
+                      marginBottom: 12,
+                      fontSize: 16,
+                      fontWeight: '600',
+                      color: '#1a1a1a',
+                    }
+                  ]}>
+                    Comment {feedbackForMultipleBuildings && <Text style={{ color: '#6c757d', fontWeight: '400' }}>(optional)</Text>}
+                  </Text>
                   <TextInput
-                    style={[styles.authInput, { minHeight: 100, textAlignVertical: 'top', paddingTop: 12 }]}
-                    placeholder="Enter your feedback here... (max 250 characters)"
+                    style={[
+                      styles.authInput,
+                      {
+                        minHeight: 120,
+                        textAlignVertical: 'top',
+                        paddingTop: 14,
+                        paddingHorizontal: 14,
+                        fontSize: 15,
+                        lineHeight: 22,
+                        borderRadius: 10,
+                        borderWidth: 1,
+                        borderColor: '#e0e0e0',
+                        backgroundColor: '#f8f9fa',
+                      }
+                    ]}
+                    placeholder={feedbackForMultipleBuildings 
+                      ? "Share your experience... (optional)" 
+                      : "Share your experience and help others..."}
                     multiline
-                    numberOfLines={4}
+                    numberOfLines={5}
                     maxLength={250}
                     value={feedbackComment}
                     onChangeText={setFeedbackComment}
-                    placeholderTextColor="#999"
+                    placeholderTextColor="#adb5bd"
                   />
-                  <Text style={{ color: '#666', fontSize: 12, marginTop: 4, textAlign: 'right' }}>
-                    {feedbackComment.length}/250
-                  </Text>
-                  {feedbackComment.length > 0 && feedbackComment.length <= 5 && (
-                    <Text style={{ color: '#dc3545', fontSize: 12, marginTop: 4 }}>
-                      Feedback must be more than 5 characters
+                  <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginTop: 8 }}>
+                    <View>
+                      {feedbackComment.length > 0 && feedbackComment.length <= 5 && (
+                        <Text style={{ color: '#dc3545', fontSize: 13, fontWeight: '500' }}>
+                          ⚠️ Feedback must be more than 5 characters
+                        </Text>
+                      )}
+                    </View>
+                    <Text style={{
+                      color: feedbackComment.length > 240 ? '#dc3545' : '#6c757d',
+                      fontSize: 13,
+                      fontWeight: '500',
+                    }}>
+                      {feedbackComment.length}/250
                     </Text>
-                  )}
+                  </View>
                 </View>
 
-                {/* Submit Button */}
-                <TouchableOpacity
-                  style={[
-                    styles.authButton, 
-                    { 
-                      backgroundColor: '#28a745', 
-                      marginTop: 10,
-                      opacity: feedbackComment.trim().length > 5 ? 1 : 0.5,
-                    }
-                  ]}
-                  disabled={feedbackComment.trim().length <= 5}
-                  onPress={async () => {
+                {/* Navigation Buttons for Multi-Building Feedback */}
+                {feedbackForMultipleBuildings ? (
+                  <View>
+                    {/* Skip Button */}
+                    <TouchableOpacity
+                      style={[
+                        styles.authButton,
+                        {
+                          backgroundColor: 'white',
+                          marginBottom: 12,
+                          borderWidth: 2,
+                          borderColor: '#6c757d',
+                          paddingVertical: 14,
+                          shadowColor: '#000',
+                          shadowOffset: { width: 0, height: 2 },
+                          shadowOpacity: 0.08,
+                          shadowRadius: 3,
+                          elevation: 2,
+                        }
+                      ]}
+                      activeOpacity={0.8}
+                      onPress={() => saveCurrentBuildingFeedback('skip')}
+                    >
+                      <Text style={[styles.authButtonText, { color: '#6c757d', fontWeight: '600' }]}>
+                        Skip {currentBuildingIndex < selectedBuildingsForFeedback.length - 1 ? '& Next' : '& Finish'}
+                      </Text>
+                    </TouchableOpacity>
+                    
+                    {/* Navigation Buttons Row */}
+                    <View style={{ flexDirection: 'row' }}>
+                      {currentBuildingIndex > 0 && (
+                        <TouchableOpacity
+                          style={[
+                            styles.authButton,
+                            {
+                              flex: 1,
+                              backgroundColor: '#007bff',
+                              marginRight: 8,
+                              paddingVertical: 14,
+                              shadowColor: '#007bff',
+                              shadowOffset: { width: 0, height: 2 },
+                              shadowOpacity: 0.3,
+                              shadowRadius: 4,
+                              elevation: 3,
+                            }
+                          ]}
+                          activeOpacity={0.8}
+                          onPress={() => saveCurrentBuildingFeedback('previous')}
+                        >
+                          <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'center' }}>
+                            <Icon name="arrow-left" size={16} color="white" style={{ marginRight: 8 }} />
+                            <Text style={[styles.authButtonText, { fontWeight: '600' }]}>Previous</Text>
+                          </View>
+                        </TouchableOpacity>
+                      )}
+                      
+                      <TouchableOpacity
+                        style={[
+                          styles.authButton,
+                          {
+                            flex: 1,
+                            backgroundColor: feedbackComment.trim().length > 0 && feedbackComment.trim().length <= 5 ? '#e0e0e0' : '#28a745',
+                            marginLeft: currentBuildingIndex > 0 ? 8 : 0,
+                            paddingVertical: 14,
+                            shadowColor: feedbackComment.trim().length > 0 && feedbackComment.trim().length <= 5 ? '#000' : '#28a745',
+                            shadowOffset: { width: 0, height: 2 },
+                            shadowOpacity: feedbackComment.trim().length > 0 && feedbackComment.trim().length <= 5 ? 0.05 : 0.3,
+                            shadowRadius: 4,
+                            elevation: feedbackComment.trim().length > 0 && feedbackComment.trim().length <= 5 ? 1 : 4,
+                          }
+                        ]}
+                        disabled={feedbackComment.trim().length > 0 && feedbackComment.trim().length <= 5}
+                        activeOpacity={0.8}
+                        onPress={() => {
+                          if (feedbackComment.trim().length > 0 && feedbackComment.trim().length <= 5) {
+                            Alert.alert('Error', 'Feedback must be more than 5 characters or left empty');
+                            return;
+                          }
+                          saveCurrentBuildingFeedback('next');
+                        }}
+                      >
+                        <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'center' }}>
+                          <Text style={[
+                            styles.authButtonText,
+                            {
+                              color: feedbackComment.trim().length > 0 && feedbackComment.trim().length <= 5 ? '#999' : 'white',
+                              fontWeight: '600',
+                            }
+                          ]}>
+                            {currentBuildingIndex < selectedBuildingsForFeedback.length - 1 ? 'Next' : 'Submit All'}
+                          </Text>
+                          {currentBuildingIndex < selectedBuildingsForFeedback.length - 1 && (
+                            <Icon
+                              name="arrow-right"
+                              size={16}
+                              color={feedbackComment.trim().length > 0 && feedbackComment.trim().length <= 5 ? '#999' : 'white'}
+                              style={{ marginLeft: 8 }}
+                            />
+                          )}
+                        </View>
+                      </TouchableOpacity>
+                    </View>
+                  </View>
+                ) : (
+                  /* Single Building Submit Button */
+                  <TouchableOpacity
+                    style={[
+                      styles.authButton, 
+                      { 
+                        backgroundColor: feedbackComment.trim().length > 5 ? '#28a745' : '#e0e0e0',
+                        marginTop: 10,
+                        paddingVertical: 14,
+                        shadowColor: feedbackComment.trim().length > 5 ? '#28a745' : '#000',
+                        shadowOffset: { width: 0, height: 2 },
+                        shadowOpacity: feedbackComment.trim().length > 5 ? 0.3 : 0.05,
+                        shadowRadius: 4,
+                        elevation: feedbackComment.trim().length > 5 ? 4 : 1,
+                      }
+                    ]}
+                    disabled={feedbackComment.trim().length <= 5}
+                    activeOpacity={0.8}
+                    onPress={async () => {
                     try {
                       if (feedbackComment.trim().length <= 5) {
                         Alert.alert('Error', 'Feedback must be more than 5 characters');
@@ -2938,8 +3996,15 @@ const App = () => {
                     }
                   }}
                 >
-                  <Text style={styles.authButtonText}>Submit Feedback</Text>
+                  <Text style={[
+                    styles.authButtonText,
+                    {
+                      color: feedbackComment.trim().length > 5 ? 'white' : '#999',
+                      fontWeight: '600',
+                    }
+                  ]}>Submit Feedback</Text>
                 </TouchableOpacity>
+                )}
               </ScrollView>
             </KeyboardAvoidingView>
             </View>
@@ -3603,8 +4668,7 @@ const App = () => {
                           profilePicture: result.user.profilePicture || null,
                         });
                         
-                        // Update saved pins and feedback history
-                        // Enrich saved pins with full pin data including images
+                        // Update saved pins - enrich with full pin data including images
                         if (result.user.activity) {
                           const savedPinsFromDB = result.user.activity.savedPins || [];
                           if (pins && pins.length > 0) {
@@ -3616,7 +4680,31 @@ const App = () => {
                           } else {
                             setSavedPins(savedPinsFromDB);
                           }
-                          setFeedbackHistory(result.user.activity.feedbackHistory || []);
+                        }
+                        
+                        // Fetch feedbacks from MongoDB Feedback collection
+                        try {
+                          const userFeedbacks = await getUserFeedbacks(result.user._id);
+                          
+                          // Transform MongoDB feedbacks to match app format
+                          const transformedFeedbacks = userFeedbacks.map(feedback => {
+                            // Find the pin to get its title
+                            const pin = pins.find(p => p._id === feedback.pinId);
+                            return {
+                              id: feedback._id,
+                              pinId: pin?.id || feedback.pinId,
+                              pinTitle: pin?.title || feedback.pinId?.title || 'Unknown Building',
+                              rating: feedback.rating || 5,
+                              comment: feedback.comment,
+                              date: feedback.createdAt || new Date().toISOString(),
+                            };
+                          });
+                          
+                          setFeedbackHistory(transformedFeedbacks);
+                        } catch (feedbackError) {
+                          console.error('Error fetching feedbacks:', feedbackError);
+                          // Continue with empty feedback history if fetch fails
+                          setFeedbackHistory([]);
                         }
                         
                         // Update settings

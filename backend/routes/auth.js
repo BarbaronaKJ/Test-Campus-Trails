@@ -334,6 +334,14 @@ router.put('/activity', async (req, res) => {
       });
     }
 
+    // Initialize activity field if it doesn't exist (backward compatibility)
+    if (!user.activity) {
+      user.activity = {
+        savedPins: [],
+        feedbackHistory: []
+      };
+    }
+
     // Update activity data
     const { savedPins, feedbackHistory } = req.body;
     
@@ -371,7 +379,13 @@ router.put('/activity', async (req, res) => {
       user.activity.feedbackHistory = feedbackHistory;
     }
 
-    user.activity.lastActiveDate = new Date();
+    // Log the data being saved for debugging
+    console.log('Saving user activity:', {
+      userId: decoded.userId,
+      savedPinsCount: user.activity.savedPins?.length,
+      feedbackCount: user.activity.feedbackHistory?.length
+    });
+
     await user.save();
 
     // Verify the save by fetching the user again
@@ -385,6 +399,11 @@ router.put('/activity', async (req, res) => {
     });
   } catch (error) {
     console.error('Update activity error:', error);
+    console.error('Error details:', {
+      name: error.name,
+      message: error.message,
+      stack: error.stack
+    });
     
     if (error.name === 'JsonWebTokenError' || error.name === 'TokenExpiredError') {
       return res.status(401).json({
