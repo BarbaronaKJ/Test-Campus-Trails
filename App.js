@@ -1605,18 +1605,18 @@ const App = () => {
       {/* Header */}
       <View style={styles.header}>
         {/* Help button (left) to keep center button centered */}
-        <TouchableOpacity style={styles.headerButtonLeft} onPress={() => alert('Help coming soon!')}>
+        <TouchableOpacity key="help-button" style={styles.headerButtonLeft} onPress={() => alert('Help coming soon!')}>
           <Icon name="question-circle" size={20} color="white" />
         </TouchableOpacity>
 
         {/* Change Campus Button (Center) */}
-        <TouchableOpacity style={styles.headerButtonCenter} onPress={toggleCampus}>
+        <TouchableOpacity key="campus-button" style={styles.headerButtonCenter} onPress={toggleCampus}>
           <Icon name="exchange" size={20} color="white" />
           <Text style={styles.buttonText}>USTP-CDO</Text>
         </TouchableOpacity>
 
         {/* Search Button (Right) */}
-        <TouchableOpacity style={styles.headerButtonRight} onPress={toggleSearch}>
+        <TouchableOpacity key="search-button" style={styles.headerButtonRight} onPress={toggleSearch}>
           <Icon name={isSearchVisible ? "times" : "search"} size={20} color="white" />
         </TouchableOpacity>
       </View>
